@@ -147,9 +147,11 @@ def create_spd_infos_coop(root_path,
 
     train_scenes = split_data['batch_split']['train']
     val_scenes = split_data['batch_split']['val']
+    test_scenes = split_data['batch_split'].get('test', [])
 
     train_spd_infos = []
     val_spd_infos = []
+    test_spd_infos = []
     spd_infos = []
 
     ## Generate  sample_info_mappings, secene_frame_mappings, total_annotations, instance_token_mappings
@@ -370,19 +372,26 @@ def create_spd_infos_coop(root_path,
             train_spd_infos.append(info)
         elif ego_vehicle_data_info['sequence_id'] in val_scenes:
             val_spd_infos.append(info)
+        elif ego_vehicle_data_info['sequence_id'] in test_scenes:
+            test_spd_infos.append(info)
         spd_infos.append(info)
 
-        if flag_save:
-            metadata = dict(version=version)
-            data = dict(infos=train_spd_infos, metadata=metadata)
-            info_path = osp.join(out_path,
-                                '{}_infos_temporal_train.pkl'.format(info_prefix))
-            mmcv.dump(data, info_path)
+    if flag_save:
+        metadata = dict(version=version)
+        data = dict(infos=train_spd_infos, metadata=metadata)
+        info_path = osp.join(out_path,
+                            '{}_infos_temporal_train.pkl'.format(info_prefix))
+        mmcv.dump(data, info_path)
 
-            data['infos'] = val_spd_infos
-            info_val_path = osp.join(out_path,
-                                    '{}_infos_temporal_val.pkl'.format(info_prefix))
-            mmcv.dump(data, info_val_path)
+        data['infos'] = val_spd_infos
+        info_val_path = osp.join(out_path,
+                                '{}_infos_temporal_val.pkl'.format(info_prefix))
+        mmcv.dump(data, info_val_path)
+
+        data['infos'] = test_spd_infos
+        info_test_path = osp.join(out_path,
+                                '{}_infos_temporal_test.pkl'.format(info_prefix))
+        mmcv.dump(data, info_test_path)
 
     return total_annotations, sample_info_mappings, spd_infos
 
@@ -469,9 +478,11 @@ def create_spd_infos(root_path,
     split_data = load_json(split_data_path)
     train_scenes = split_data['batch_split']['train']
     val_scenes = split_data['batch_split']['val']
+    test_scenes = split_data['batch_split'].get('test', [])
 
     train_spd_infos = []
     val_spd_infos = []
+    test_spd_infos = []
     spd_infos = []
 
     ## Generate  sample_info_mappings, secene_frame_mappings, total_annotations, instance_token_mappings
@@ -614,19 +625,26 @@ def create_spd_infos(root_path,
             train_spd_infos.append(info)
         elif data_info['sequence_id'] in val_scenes:
             val_spd_infos.append(info)
+        elif data_info['sequence_id'] in test_scenes:
+            test_spd_infos.append(info)
         spd_infos.append(info)
 
-        if flag_save:
-            metadata = dict(version=version)
-            data = dict(infos=train_spd_infos, metadata=metadata)
-            info_path = osp.join(out_path,
-                                    '{}_infos_temporal_train.pkl'.format(info_prefix))
-            mmcv.dump(data, info_path)
+    if flag_save:
+        metadata = dict(version=version)
+        data = dict(infos=train_spd_infos, metadata=metadata)
+        info_path = osp.join(out_path,
+                                '{}_infos_temporal_train.pkl'.format(info_prefix))
+        mmcv.dump(data, info_path)
 
-            data['infos'] = val_spd_infos
-            info_val_path = osp.join(out_path,
-                                        '{}_infos_temporal_val.pkl'.format(info_prefix))
-            mmcv.dump(data, info_val_path)
+        data['infos'] = val_spd_infos
+        info_val_path = osp.join(out_path,
+                                    '{}_infos_temporal_val.pkl'.format(info_prefix))
+        mmcv.dump(data, info_val_path)
+
+        data['infos'] = test_spd_infos
+        info_test_path = osp.join(out_path,
+                                    '{}_infos_temporal_test.pkl'.format(info_prefix))
+        mmcv.dump(data, info_test_path)
 
 
     return total_annotations, sample_info_mappings, spd_infos
@@ -1117,7 +1135,7 @@ if __name__ == "__main__":
 
     curDirectory = os.getcwd()
     basepath = os.path.basename(os.path.normpath(curDirectory))
-    if basepath != 'UniV2X':
+    if basepath not in ('UniV2X', 'UniV2X_overlay'):
         os.chdir('UniV2X/')
 
     curDirectory = os.getcwd()
@@ -1154,4 +1172,3 @@ if __name__ == "__main__":
                                                                             info_prefix,
                                                                             version=args.version,
                                                                             max_sweeps=10)
-

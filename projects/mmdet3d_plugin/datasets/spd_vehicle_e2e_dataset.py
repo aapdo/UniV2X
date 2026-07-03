@@ -6,6 +6,7 @@
 #----------------------------------------------------------------#
 
 import copy
+import hashlib
 import numpy as np
 import torch
 import mmcv
@@ -44,6 +45,73 @@ class SPDE2EDataset(NuScenesDataset):
     This dataset only add camera intrinsics and extrinsics to the results.
     """
 
+    _PHYSICAL_SHIFT_NAMES = {
+        'relative_pose_noise',
+        'pose_noise',
+        'calibration_drift',
+        'fov_mask',
+        'lidar_sparsity',
+        'point_dropout',
+        'missing_camera',
+        'camera_dropout',
+        'missing_modality',
+        'modality_dropout',
+        'infrastructure_latency',
+        'latency',
+        'unseen_sensor_setup',
+        'compound',
+    }
+    _RELATIVE_POSE_NOISE_PRESETS = {
+        0: dict(yaw_deg=0.0, translation_m=0.0),
+        1: dict(yaw_deg=0.5, translation_m=0.05),
+        2: dict(yaw_deg=1.0, translation_m=0.10),
+        3: dict(yaw_deg=2.0, translation_m=0.20),
+    }
+    _FOV_MASK_PRESETS = {
+        0: 1.00,
+        1: 0.90,
+        2: 0.75,
+        3: 0.60,
+    }
+    _MISSING_CAMERA_PRESETS = {
+        0: 0.00,
+        1: 0.10,
+        2: 0.30,
+        3: 0.50,
+    }
+    _LIDAR_KEEP_RATIO_PRESETS = {
+        0: 1.00,
+        1: 0.50,
+        2: 0.25,
+        3: 0.10,
+    }
+    _LATENCY_FRAME_PRESETS = {
+        0: 0,
+        1: 1,
+        2: 2,
+        3: 3,
+    }
+    _MISSING_MODALITY_PRESETS = {
+        0: dict(camera_drop_probability=0.00, lidar_keep_ratio=1.00),
+        1: dict(camera_drop_probability=0.25, lidar_keep_ratio=0.50),
+        2: dict(camera_drop_probability=0.50, lidar_keep_ratio=0.25),
+        3: dict(camera_drop_probability=1.00, lidar_keep_ratio=0.10),
+    }
+    _UNSEEN_SENSOR_SETUP_PRESETS = {
+        0: dict(fov_keep_ratio=1.00, lidar_keep_ratio=1.00,
+                yaw_deg=0.0, translation_m=0.0, frame_delay=0,
+                camera_drop_probability=0.00),
+        1: dict(fov_keep_ratio=0.85, lidar_keep_ratio=0.50,
+                yaw_deg=0.5, translation_m=0.05, frame_delay=0,
+                camera_drop_probability=0.00),
+        2: dict(fov_keep_ratio=0.70, lidar_keep_ratio=0.25,
+                yaw_deg=1.0, translation_m=0.10, frame_delay=1,
+                camera_drop_probability=0.10),
+        3: dict(fov_keep_ratio=0.55, lidar_keep_ratio=0.10,
+                yaw_deg=2.0, translation_m=0.20, frame_delay=2,
+                camera_drop_probability=0.25),
+    }
+
     def __init__(self,
                 queue_length=4,
                 bev_size=(200, 200),
@@ -78,6 +146,7 @@ class SPDE2EDataset(NuScenesDataset):
                 class_range=None,
                 new_range_100=False,
                 other_agent_names=[],
+                physical_shift=None,
                 *args,
                 **kwargs):
         # init before super init since it is called in parent class
@@ -181,6 +250,371 @@ class SPDE2EDataset(NuScenesDataset):
         self.class_range=class_range
         self.new_range_100 = new_range_100
         self.other_agent_names = other_agent_names
+        self.physical_shift = physical_shift or dict(enabled=False)
+        if self.physical_shift.get('enabled', False):
+            name = self.physical_shift.get('name', 'relative_pose_noise')
+            if name not in self._PHYSICAL_SHIFT_NAMES:
+                raise ValueError('Unsupported physical_shift name: {}'.format(name))
+            materialized = self._materialize_physical_shift(self.physical_shift)
+            if materialized.get('name', '') in [
+                    'compound', 'missing_modality', 'modality_dropout',
+                    'unseen_sensor_setup']:
+                for subshift in materialized.get('shifts', []):
+                    sub_name = subshift.get('name', '')
+                    if sub_name not in self._PHYSICAL_SHIFT_NAMES or sub_name in [
+                            'compound', 'missing_modality', 'modality_dropout',
+                            'unseen_sensor_setup']:
+                        raise ValueError(
+                            'Unsupported compound physical_shift name: {}'.format(sub_name))
+
+    def _physical_shift_applies(self, agent_name):
+        cfg = self.physical_shift
+        if not cfg or not cfg.get('enabled', False):
+            return False
+        target_agents = cfg.get('target_agents', ['model_other_agent_inf'])
+        if isinstance(target_agents, str):
+            target_agents = [target_agents]
+        return 'all' in target_agents or agent_name in target_agents
+
+    def _physical_shift_rng(self, info, agent_name, cfg=None, shift_idx=None):
+        cfg = cfg or self.physical_shift
+        key_parts = [
+            str(getattr(self, 'version', '')),
+            str(getattr(self, 'ann_file', '')),
+            str(getattr(self, 'test_mode', '')),
+            str(info.get('scene_token', '')),
+            str(info.get('token', '')),
+            str(agent_name),
+            str(cfg.get('name', 'relative_pose_noise')),
+            str(cfg.get('severity', 0)),
+            str(cfg.get('seed', 0)),
+        ]
+        if shift_idx is not None:
+            key_parts.append(str(shift_idx))
+        digest = hashlib.sha256('|'.join(key_parts).encode('utf-8')).digest()
+        seed = int.from_bytes(digest[:4], byteorder='little', signed=False)
+        return np.random.RandomState(seed), seed
+
+    def _relative_pose_noise_bounds(self, cfg=None):
+        cfg = cfg or self.physical_shift
+        severity = int(cfg.get('severity', 0))
+        preset = self._RELATIVE_POSE_NOISE_PRESETS.get(
+            severity, self._RELATIVE_POSE_NOISE_PRESETS[3])
+        yaw_deg = float(cfg.get('yaw_deg', preset['yaw_deg']))
+        translation_m = float(cfg.get('translation_m', preset['translation_m']))
+        return yaw_deg, translation_m
+
+    def _fov_keep_ratio(self, cfg=None):
+        cfg = cfg or self.physical_shift
+        severity = int(cfg.get('severity', 0))
+        preset = self._FOV_MASK_PRESETS.get(severity, self._FOV_MASK_PRESETS[3])
+        return float(cfg.get('keep_ratio', preset))
+
+    def _missing_camera_probability(self, cfg=None):
+        cfg = cfg or self.physical_shift
+        severity = int(cfg.get('severity', 0))
+        preset = self._MISSING_CAMERA_PRESETS.get(
+            severity, self._MISSING_CAMERA_PRESETS[3])
+        return float(cfg.get('drop_probability', preset))
+
+    def _lidar_keep_ratio(self, cfg=None):
+        cfg = cfg or self.physical_shift
+        severity = int(cfg.get('severity', 0))
+        preset = self._LIDAR_KEEP_RATIO_PRESETS.get(
+            severity, self._LIDAR_KEEP_RATIO_PRESETS[3])
+        return float(cfg.get('keep_ratio', preset))
+
+    def _latency_frame_delay(self, cfg=None):
+        cfg = cfg or self.physical_shift
+        severity = int(cfg.get('severity', 0))
+        preset = self._LATENCY_FRAME_PRESETS.get(
+            severity, self._LATENCY_FRAME_PRESETS[3])
+        return int(cfg.get('frame_delay', preset))
+
+    def _materialize_physical_shift(self, cfg=None):
+        cfg = (cfg or self.physical_shift or dict(enabled=False)).copy()
+        name = cfg.get('name', 'relative_pose_noise')
+        severity = int(cfg.get('severity', 0))
+        seed = int(cfg.get('seed', 0))
+
+        if name in ['missing_modality', 'modality_dropout']:
+            preset = self._MISSING_MODALITY_PRESETS.get(
+                severity, self._MISSING_MODALITY_PRESETS[3])
+            camera_drop = float(cfg.get(
+                'camera_drop_probability',
+                cfg.get('drop_probability', preset['camera_drop_probability'])))
+            lidar_keep = float(cfg.get(
+                'lidar_keep_ratio',
+                cfg.get('keep_ratio', preset['lidar_keep_ratio'])))
+            modalities = cfg.get('modalities', ['camera', 'lidar'])
+            if isinstance(modalities, str):
+                modalities = [modalities]
+
+            shifts = []
+            if 'camera' in modalities:
+                shifts.append(dict(
+                    name='missing_camera',
+                    severity=severity,
+                    seed=seed,
+                    drop_probability=camera_drop,
+                    ensure_one_view=bool(cfg.get('ensure_one_view', False)),
+                    modality='camera'))
+            if 'lidar' in modalities:
+                shifts.append(dict(
+                    name='lidar_sparsity',
+                    severity=severity,
+                    seed=seed,
+                    keep_ratio=lidar_keep,
+                    modality='lidar'))
+            cfg['shifts'] = cfg.get('shifts', shifts)
+            return cfg
+
+        if name == 'unseen_sensor_setup':
+            preset = self._UNSEEN_SENSOR_SETUP_PRESETS.get(
+                severity, self._UNSEEN_SENSOR_SETUP_PRESETS[3])
+            shifts = [
+                dict(
+                    name='fov_mask',
+                    severity=severity,
+                    seed=seed,
+                    keep_ratio=float(cfg.get(
+                        'fov_keep_ratio', preset['fov_keep_ratio'])),
+                    mask_axis=cfg.get('mask_axis', 'horizontal'),
+                    sensor_setup='unseen_fov'),
+                dict(
+                    name='lidar_sparsity',
+                    severity=severity,
+                    seed=seed,
+                    keep_ratio=float(cfg.get(
+                        'lidar_keep_ratio', preset['lidar_keep_ratio'])),
+                    sensor_setup='unseen_lidar_density'),
+                dict(
+                    name='calibration_drift',
+                    severity=severity,
+                    seed=seed,
+                    yaw_deg=float(cfg.get('yaw_deg', preset['yaw_deg'])),
+                    translation_m=float(cfg.get(
+                        'translation_m', preset['translation_m'])),
+                    sensor_setup='unseen_extrinsic'),
+            ]
+            frame_delay = int(cfg.get('frame_delay', preset['frame_delay']))
+            if frame_delay > 0:
+                shifts.append(dict(
+                    name='infrastructure_latency',
+                    severity=severity,
+                    seed=seed,
+                    frame_delay=frame_delay,
+                    sensor_setup='unseen_latency'))
+            camera_drop = float(cfg.get(
+                'camera_drop_probability',
+                preset['camera_drop_probability']))
+            if camera_drop > 0.0:
+                shifts.append(dict(
+                    name='missing_camera',
+                    severity=severity,
+                    seed=seed,
+                    drop_probability=camera_drop,
+                    ensure_one_view=bool(cfg.get('ensure_one_view', False)),
+                    sensor_setup='unseen_camera_availability'))
+            cfg['shifts'] = cfg.get('shifts', shifts)
+            cfg['unseen_sensor_setup'] = dict(
+                fov_keep_ratio=shifts[0]['keep_ratio'],
+                lidar_keep_ratio=shifts[1]['keep_ratio'],
+                yaw_deg=shifts[2]['yaw_deg'],
+                translation_m=shifts[2]['translation_m'],
+                frame_delay=frame_delay,
+                camera_drop_probability=camera_drop)
+            return cfg
+
+        return cfg
+
+    def _latency_shift_cfg(self, agent_name):
+        cfg = self._materialize_physical_shift()
+        if not cfg or not cfg.get('enabled', False) or agent_name == 'ego_vehicle':
+            return None, None
+
+        shift_name = cfg.get('name', 'relative_pose_noise')
+        if shift_name in ['infrastructure_latency', 'latency']:
+            return (cfg, None) if self._physical_shift_applies(agent_name) else (None, None)
+
+        if shift_name in [
+                'compound', 'missing_modality', 'modality_dropout',
+                'unseen_sensor_setup']:
+            if not self._physical_shift_applies(agent_name):
+                return None, None
+            for shift_idx, sub_cfg in enumerate(cfg.get('shifts', [])):
+                merged_cfg = cfg.copy()
+                merged_cfg.update(sub_cfg)
+                if (merged_cfg.get('name', '') in ['infrastructure_latency', 'latency'] and
+                        self._subshift_applies(merged_cfg, agent_name)):
+                    return merged_cfg, shift_idx
+        return None, None
+
+    def _get_agent_info_with_latency(self, index, agent_name):
+        if agent_name == 'ego_vehicle':
+            return self.data_infos[index], None
+
+        current_info = self.data_infos[index]['other_agent_info_dict'][agent_name]
+        latency_cfg, shift_idx = self._latency_shift_cfg(agent_name)
+        if latency_cfg is None:
+            return current_info, None
+
+        requested_delay = max(0, self._latency_frame_delay(latency_cfg))
+        stale_index = index
+        candidate_index = index - requested_delay
+        if requested_delay > 0 and candidate_index >= 0:
+            candidate_info = self.data_infos[candidate_index]['other_agent_info_dict'][agent_name]
+            if candidate_info['scene_token'] == current_info['scene_token']:
+                stale_index = candidate_index
+
+        stale_info = self.data_infos[stale_index]['other_agent_info_dict'][agent_name]
+        _, stable_seed = self._physical_shift_rng(
+            current_info, agent_name, cfg=latency_cfg, shift_idx=shift_idx)
+        timestamp_delay_s = float(
+            (current_info['timestamp'] - stale_info['timestamp']) / 1e6)
+        shift_meta = dict(
+            name='infrastructure_latency',
+            severity=int(latency_cfg.get('severity', 0)),
+            seed=int(latency_cfg.get('seed', 0)),
+            stable_seed=int(stable_seed),
+            target_agent=agent_name,
+            metadata_mode=latency_cfg.get(
+                'metadata_mode',
+                self.physical_shift.get('metadata_mode', 'noisy')),
+            label_preserving=True,
+            requested_frame_delay=int(requested_delay),
+            effective_frame_delay=int(index - stale_index),
+            timestamp_delay_s=timestamp_delay_s,
+            current_sample_token=current_info.get('token', ''),
+            stale_sample_token=stale_info.get('token', ''),
+            units=dict(frame_delay='frame', timestamp_delay='second'),
+        )
+        return stale_info, shift_meta
+
+    @staticmethod
+    def _row_se2_delta(yaw_rad, dx, dy):
+        # UniV2X stores SE(3) transforms for row-vector multiplication.
+        c = np.cos(yaw_rad)
+        s = np.sin(yaw_rad)
+        delta = np.eye(4, dtype=np.float32)
+        delta[0, 0] = c
+        delta[0, 1] = s
+        delta[1, 0] = -s
+        delta[1, 1] = c
+        delta[3, 0] = dx
+        delta[3, 1] = dy
+        return delta
+
+    def _apply_single_physical_shift(self, input_dict, info, agent_name, cfg, shift_idx=None):
+        shift_name = cfg.get('name', 'relative_pose_noise')
+        if shift_name not in self._PHYSICAL_SHIFT_NAMES or shift_name == 'compound':
+            raise ValueError('Unsupported physical_shift name: {}'.format(shift_name))
+        if shift_name in ['infrastructure_latency', 'latency']:
+            raise ValueError(
+                'infrastructure_latency must be applied before data dict construction')
+
+        rng, stable_seed = self._physical_shift_rng(
+            info, agent_name, cfg=cfg, shift_idx=shift_idx)
+        shift_meta = dict(
+            name=shift_name,
+            severity=int(cfg.get('severity', 0)),
+            seed=int(cfg.get('seed', 0)),
+            stable_seed=int(stable_seed),
+            target_agent=agent_name,
+            metadata_mode=cfg.get(
+                'metadata_mode',
+                self.physical_shift.get('metadata_mode', 'noisy')),
+            label_preserving=True,
+        )
+        if shift_name in ['relative_pose_noise', 'pose_noise', 'calibration_drift']:
+            yaw_bound_deg, trans_bound_m = self._relative_pose_noise_bounds(cfg)
+            yaw_deg = float(rng.uniform(-yaw_bound_deg, yaw_bound_deg))
+            dx = float(rng.uniform(-trans_bound_m, trans_bound_m))
+            dy = float(rng.uniform(-trans_bound_m, trans_bound_m))
+            delta = self._row_se2_delta(np.deg2rad(yaw_deg), dx, dy)
+
+            input_dict['veh2inf_rt'] = (
+                input_dict['veh2inf_rt'].astype(np.float32) @ delta).astype(np.float32)
+            shift_meta.update(dict(
+                yaw_deg=yaw_deg,
+                translation_m=[dx, dy, 0.0],
+                units=dict(yaw='degree', translation='meter'),
+            ))
+        elif shift_name == 'fov_mask':
+            shift_meta.update(dict(
+                keep_ratio=self._fov_keep_ratio(cfg),
+                mask_axis=cfg.get('mask_axis', 'horizontal'),
+                units=dict(keep_ratio='image_width_fraction'),
+            ))
+        elif shift_name in ['lidar_sparsity', 'point_dropout']:
+            shift_meta.update(dict(
+                keep_ratio=self._lidar_keep_ratio(cfg),
+                units=dict(keep_ratio='point_fraction'),
+            ))
+        elif shift_name in ['missing_camera', 'camera_dropout']:
+            shift_meta.update(dict(
+                drop_probability=self._missing_camera_probability(cfg),
+                ensure_one_view=bool(cfg.get('ensure_one_view', False)),
+                units=dict(drop_probability='probability'),
+            ))
+        return shift_meta
+
+    def _subshift_applies(self, cfg, agent_name):
+        target_agents = cfg.get(
+            'target_agents',
+            self.physical_shift.get('target_agents', ['model_other_agent_inf']))
+        if isinstance(target_agents, str):
+            target_agents = [target_agents]
+        return 'all' in target_agents or agent_name in target_agents
+
+    def _apply_physical_shift(self, input_dict, info, agent_name):
+        if not self._physical_shift_applies(agent_name):
+            return
+
+        cfg = self._materialize_physical_shift()
+        shift_name = cfg.get('name', 'relative_pose_noise')
+        if shift_name not in self._PHYSICAL_SHIFT_NAMES:
+            raise ValueError('Unsupported physical_shift name: {}'.format(shift_name))
+
+        if shift_name in ['infrastructure_latency', 'latency']:
+            return
+
+        if shift_name in [
+                'compound', 'missing_modality', 'modality_dropout',
+                'unseen_sensor_setup']:
+            applied_shifts = []
+            existing_shift = input_dict.get('physical_shift', None)
+            if existing_shift and existing_shift.get('name', '') == 'infrastructure_latency':
+                applied_shifts.append(existing_shift)
+            for shift_idx, sub_cfg in enumerate(cfg.get('shifts', [])):
+                merged_cfg = cfg.copy()
+                merged_cfg.update(sub_cfg)
+                if merged_cfg.get('name', '') in ['infrastructure_latency', 'latency']:
+                    continue
+                if not self._subshift_applies(merged_cfg, agent_name):
+                    continue
+                applied_shifts.append(self._apply_single_physical_shift(
+                    input_dict, info, agent_name, merged_cfg, shift_idx=shift_idx))
+            if not applied_shifts:
+                return
+            shift_meta = dict(
+                name=shift_name,
+                severity=int(cfg.get('severity', 0)),
+                seed=int(cfg.get('seed', 0)),
+                target_agent=agent_name,
+                metadata_mode=cfg.get('metadata_mode', 'noisy'),
+                label_preserving=True,
+                shifts=applied_shifts,
+            )
+            if 'unseen_sensor_setup' in cfg:
+                shift_meta['unseen_sensor_setup'] = cfg['unseen_sensor_setup']
+            input_dict['physical_shift'] = shift_meta
+            input_dict['physical_shift_config'] = shift_meta
+            return
+
+        shift_meta = self._apply_single_physical_shift(input_dict, info, agent_name, cfg)
+        input_dict['physical_shift'] = shift_meta
+        input_dict['physical_shift_config'] = shift_meta
 
     def __len__(self):
         if not self.is_debug:
@@ -412,6 +846,10 @@ class SPDE2EDataset(NuScenesDataset):
         queue['gt_past_traj_mask'] = DC(gt_past_traj_mask_list)
         queue['gt_future_boxes'] = DC(gt_future_boxes_list, cpu_only=True)
         queue['gt_future_labels'] = DC(gt_future_labels_list)
+        # Lane annotations are variable length across samples; keep them per-sample.
+        for lane_key in ('gt_lane_labels', 'gt_lane_bboxes', 'gt_lane_masks'):
+            if lane_key in queue:
+                queue[lane_key] = DC(queue[lane_key])
         return queue
 
     def get_ann_info(self, index):
@@ -437,12 +875,29 @@ class SPDE2EDataset(NuScenesDataset):
             mask = info['valid_flag']
         else:
             mask = info['num_lidar_pts'] > 0
-        gt_bboxes_3d = info['gt_boxes'][mask]
-        gt_names_3d = info['gt_names'][mask]
-        gt_inds = info['gt_inds'][mask]
-
         sample = self.nusc.get('sample', info['token'])
-        ann_tokens = np.array(sample['anns'])[mask]
+        ann_token_source = sample['anns']
+        if len(ann_token_source) != len(mask):
+            common_len = min(
+                len(ann_token_source),
+                len(mask),
+                len(info['gt_boxes']),
+                len(info['gt_names']),
+                len(info['gt_inds']))
+            ann_token_source = ann_token_source[:common_len]
+            mask = mask[:common_len]
+            gt_boxes = info['gt_boxes'][:common_len]
+            gt_names = info['gt_names'][:common_len]
+            gt_inds_source = info['gt_inds'][:common_len]
+        else:
+            gt_boxes = info['gt_boxes']
+            gt_names = info['gt_names']
+            gt_inds_source = info['gt_inds']
+
+        gt_bboxes_3d = gt_boxes[mask]
+        gt_names_3d = gt_names[mask]
+        gt_inds = gt_inds_source[mask]
+        ann_tokens = np.array(ann_token_source)[mask]
         assert ann_tokens.shape[0] == gt_bboxes_3d.shape[0]
 
         gt_fut_traj, gt_fut_traj_mask, gt_past_traj, gt_past_traj_mask = self.traj_api.get_traj_label(
@@ -520,10 +975,7 @@ class SPDE2EDataset(NuScenesDataset):
         if self.inference_wo_label:
             return self.get_data_info_wo_label(index, agent_name)
 
-        if agent_name == 'ego_vehicle':
-            info = self.data_infos[index]
-        else:
-            info = self.data_infos[index]['other_agent_info_dict'][agent_name]
+        info, pre_shift_meta = self._get_agent_info_with_latency(index, agent_name)
 
         # semantic format
         # lane_info = self.lane_infos[index] if self.lane_infos else None
@@ -630,6 +1082,10 @@ class SPDE2EDataset(NuScenesDataset):
             veh2inf_rt[:3, 3] = veh2inf_t
             veh2inf_rt = veh2inf_rt.T
         input_dict.update(dict(veh2inf_rt=veh2inf_rt.astype(np.float32)))
+        if pre_shift_meta:
+            input_dict['physical_shift'] = pre_shift_meta
+            input_dict['physical_shift_config'] = pre_shift_meta
+        self._apply_physical_shift(input_dict, info, agent_name)
 
         if self.modality['use_camera']:
             image_paths = []
@@ -728,10 +1184,7 @@ class SPDE2EDataset(NuScenesDataset):
                 - ann_info (dict): Annotation info.
         """
 
-        if agent_name == 'ego_vehicle':
-            info = self.data_infos[index]
-        else:
-            info = self.data_infos[index]['other_agent_info_dict'][agent_name]
+        info, pre_shift_meta = self._get_agent_info_with_latency(index, agent_name)
 
         if 'token_inf' in info:
             token_inf = info['token_inf']
@@ -780,6 +1233,10 @@ class SPDE2EDataset(NuScenesDataset):
             veh2inf_rt[:3, 3] = veh2inf_t
             veh2inf_rt = veh2inf_rt.T
         input_dict.update(dict(veh2inf_rt=veh2inf_rt.astype(np.float32)))
+        if pre_shift_meta:
+            input_dict['physical_shift'] = pre_shift_meta
+            input_dict['physical_shift_config'] = pre_shift_meta
+        self._apply_physical_shift(input_dict, info, agent_name)
 
         if self.modality['use_camera']:
             image_paths = []

@@ -20,7 +20,7 @@ from mmdet.models import build_loss
 from einops import rearrange
 from mmdet.models.utils.transformer import inverse_sigmoid
 from ..dense_heads.track_head_plugin import MemoryBank, QueryInteractionModule, Instances, RuntimeTrackerBase
-from ..fusion_modules import AgentQueryFusion
+from ..fusion_modules.agent_fusion import AgentQueryFusion, PhysicalQueryAdapter
 import mmcv,os
 import torch.nn.functional as F
 
@@ -82,7 +82,10 @@ class UniV2XTrack(MVXTwoStageDetector):
         is_ego_agent=False,
         return_track_query=True,
         save_track_query=False,
-        save_track_query_file_root=''
+        save_track_query_file_root='',
+        physical_query_adapter=None,
+        physical_image_adapter=None,
+        skip_history_bev=False,
     ):
         super(UniV2XTrack, self).__init__(
             img_backbone=img_backbone,
@@ -105,6 +108,7 @@ class UniV2XTrack(MVXTwoStageDetector):
         self.pc_range = pc_range
         self.inf_pc_range = inf_pc_range
         self.queue_length = queue_length
+        self.skip_history_bev = skip_history_bev
         if freeze_img_backbone:
             if freeze_bn:
                 self.img_backbone.eval()
@@ -169,7 +173,8 @@ class UniV2XTrack(MVXTwoStageDetector):
         self.is_cooperation = is_cooperation
         if self.is_cooperation:
             self.cross_agent_query_interaction = AgentQueryFusion(pc_range=self.pc_range,
-                                                                                    embed_dims=self.embed_dims)
+                                                                                    embed_dims=self.embed_dims,
+                                                                                    physical_query_adapter=physical_query_adapter)
 
         self.save_track_query = save_track_query
         self.save_track_query_file_root = save_track_query_file_root
@@ -179,8 +184,101 @@ class UniV2XTrack(MVXTwoStageDetector):
 
         self.is_ego_agent = is_ego_agent
         self.return_track_query = return_track_query
+        self.physical_query_adapter_cfg = physical_query_adapter or dict(enabled=False)
+        self.physical_image_adapter_cfg = physical_image_adapter or dict(enabled=False)
+        self.physical_image_adapter = None
+        if physical_image_adapter and physical_image_adapter.get('enabled', False):
+            image_adapter_cfg = physical_image_adapter.copy()
+            image_adapter_cfg.pop('enabled', None)
+            image_adapter_cfg.pop('freeze_non_adapter', None)
+            image_adapter_cfg.pop('trainable_keys', None)
+            feature_dim = image_adapter_cfg.pop('feature_dim', self.embed_dims)
+            self.physical_image_adapter = PhysicalQueryAdapter(
+                feature_dim=feature_dim, **image_adapter_cfg)
 
-    def extract_img_feat(self, img, len_queue=None):
+    @staticmethod
+    def _unwrap_meta_value(value):
+        if hasattr(value, 'data'):
+            return value.data
+        return value
+
+    @classmethod
+    def _first_meta_dict(cls, value):
+        value = cls._unwrap_meta_value(value)
+        if isinstance(value, dict):
+            if 'physical_shift' not in value:
+                frame_keys = [k for k, v in value.items() if isinstance(v, dict)]
+                if frame_keys:
+                    try:
+                        last_key = sorted(frame_keys)[-1]
+                    except TypeError:
+                        last_key = frame_keys[-1]
+                    return cls._first_meta_dict(value[last_key])
+            return value
+        if isinstance(value, (list, tuple)) and value:
+            return cls._first_meta_dict(value[0])
+        return None
+
+    @classmethod
+    def _meta_at(cls, img_metas, batch_idx=0, frame_idx=None):
+        metas = cls._unwrap_meta_value(img_metas)
+        if isinstance(metas, (list, tuple)) and metas:
+            item = metas[min(batch_idx, len(metas) - 1)]
+            item = cls._unwrap_meta_value(item)
+            if isinstance(item, (list, tuple)) and item:
+                if frame_idx is None:
+                    item = item[-1]
+                else:
+                    item = item[min(frame_idx, len(item) - 1)]
+            return cls._first_meta_dict(item)
+        return cls._first_meta_dict(metas)
+
+    @classmethod
+    def _physical_shift_at(cls, img_metas, batch_idx=0, frame_idx=None):
+        meta = cls._meta_at(img_metas, batch_idx=batch_idx, frame_idx=frame_idx)
+        if not isinstance(meta, dict):
+            return None
+        return meta.get('physical_shift', None)
+
+    def _adapt_single_img_feat(self, img_feat, physical_shift=None):
+        if self.physical_image_adapter is None or physical_shift is None:
+            return img_feat
+        num_cam, channels, height, width = img_feat.shape
+        if channels != self.physical_image_adapter.feature_dim:
+            raise ValueError(
+                'physical_image_adapter feature_dim={} does not match '
+                'image feature channels={}'.format(
+                    self.physical_image_adapter.feature_dim, channels))
+        feat = img_feat.permute(0, 2, 3, 1).reshape(-1, channels)
+        feat = self.physical_image_adapter(feat, physical_shift=physical_shift)
+        return feat.reshape(num_cam, height, width, channels).permute(0, 3, 1, 2)
+
+    def _adapt_img_feat(self, img_feat, img_metas=None, len_queue=None):
+        if self.physical_image_adapter is None or img_metas is None:
+            return img_feat
+        if img_feat.dim() == 5:
+            adapted = []
+            for batch_idx in range(img_feat.shape[0]):
+                physical_shift = self._physical_shift_at(
+                    img_metas, batch_idx=batch_idx)
+                adapted.append(self._adapt_single_img_feat(
+                    img_feat[batch_idx], physical_shift=physical_shift))
+            return torch.stack(adapted, dim=0)
+        if img_feat.dim() == 6:
+            adapted_batch = []
+            for batch_idx in range(img_feat.shape[0]):
+                adapted_frames = []
+                for frame_idx in range(img_feat.shape[1]):
+                    physical_shift = self._physical_shift_at(
+                        img_metas, batch_idx=batch_idx, frame_idx=frame_idx)
+                    adapted_frames.append(self._adapt_single_img_feat(
+                        img_feat[batch_idx, frame_idx],
+                        physical_shift=physical_shift))
+                adapted_batch.append(torch.stack(adapted_frames, dim=0))
+            return torch.stack(adapted_batch, dim=0)
+        return img_feat
+
+    def extract_img_feat(self, img, len_queue=None, img_metas=None):
         """Extract features of images."""
         if img is None:
             return None
@@ -202,6 +300,8 @@ class UniV2XTrack(MVXTwoStageDetector):
                 img_feat_reshaped = img_feat.view(B//len_queue, len_queue, N, c, h, w)
             else:
                 img_feat_reshaped = img_feat.view(B, N, c, h, w)
+            img_feat_reshaped = self._adapt_img_feat(
+                img_feat_reshaped, img_metas=img_metas, len_queue=len_queue)
             img_feats_reshaped.append(img_feat_reshaped)
         return img_feats_reshaped
 
@@ -297,7 +397,9 @@ class UniV2XTrack(MVXTwoStageDetector):
 
         ref_pts = reference_points @ l2g_r1 + l2g_t1 - l2g_t2
 
-        g2l_r = torch.linalg.inv(l2g_r2).type(torch.float)
+        # l2g_r2 is a rotation matrix, so inverse equals transpose. Using the
+        # transpose avoids a CUDA cusolver handle allocation during eval.
+        g2l_r = l2g_r2.transpose(-1, -2).type(torch.float)
 
         ref_pts = ref_pts @ g2l_r
 
@@ -352,7 +454,8 @@ class UniV2XTrack(MVXTwoStageDetector):
             prev_bev = None
             bs, len_queue, num_cams, C, H, W = imgs_queue.shape
             imgs_queue = imgs_queue.reshape(bs * len_queue, num_cams, C, H, W)
-            img_feats_list = self.extract_img_feat(img=imgs_queue, len_queue=len_queue)
+            img_feats_list = self.extract_img_feat(
+                img=imgs_queue, len_queue=len_queue, img_metas=img_metas_list)
             for i in range(len_queue):
                 img_metas = [each[i] for each in img_metas_list]
                 img_feats = [each_scale[:, i] for each_scale in img_feats_list]
@@ -367,9 +470,10 @@ class UniV2XTrack(MVXTwoStageDetector):
     def get_bevs(self, imgs, img_metas, prev_img=None, prev_img_metas=None, prev_bev=None):
         if prev_img is not None and prev_img_metas is not None:
             assert prev_bev is None
-            prev_bev = self.get_history_bev(prev_img, prev_img_metas)
+            if not self.skip_history_bev:
+                prev_bev = self.get_history_bev(prev_img, prev_img_metas)
 
-        img_feats = self.extract_img_feat(img=imgs)
+        img_feats = self.extract_img_feat(img=imgs, img_metas=img_metas)
         if self.freeze_bev_encoder:
             with torch.no_grad():
                 bev_embed, bev_pos = self.pts_bbox_head.get_bev_features(
@@ -385,8 +489,8 @@ class UniV2XTrack(MVXTwoStageDetector):
         return bev_embed, bev_pos
 
     def _get_coop_bev_embed(self, bev_embed_src, bev_pos_src, track_instances, start_idx):
-        bev_embed = bev_embed_src
-        bev_pos = bev_pos_src
+        bev_embed = bev_embed_src.clone()
+        bev_pos = bev_pos_src.clone()
         act_track_instances = track_instances[start_idx:]  
 
         # print('act_track_instances len:',len(act_track_instances))
@@ -459,12 +563,17 @@ class UniV2XTrack(MVXTwoStageDetector):
                 other_agent_track_instances = other_agent_result['univ2x_track_instances_list'][univ2x_frame_id]
                 ego2other_rt = other_agent_result['ego2other_rt']
                 other_agent_pc_range = other_agent_result['pc_range']
+                physical_shift = other_agent_result.get('physical_shift', None)
                 track_nums_src = len(track_instances)
-                track_instances = self.cross_agent_query_interaction(other_agent_track_instances, track_instances, ego2other_rt, other_agent_pc_range)
+                track_instances = self.cross_agent_query_interaction(
+                    other_agent_track_instances, track_instances, ego2other_rt,
+                    other_agent_pc_range, physical_shift=physical_shift)
                 track_nums_new = len(track_instances)
                 add_nums = track_nums_new - track_nums_src
 
                 bev_embed,bev_pos = self._get_coop_bev_embed(bev_embed, bev_pos, track_instances, track_nums_new-add_nums)
+                bev_embed = self.cross_agent_query_interaction.adapt_bev_embed(
+                    bev_embed, physical_shift=physical_shift)
 
         det_output = self.pts_bbox_head.get_detections(
             bev_embed,
@@ -754,12 +863,17 @@ class UniV2XTrack(MVXTwoStageDetector):
                 other_agent_track_instances = other_agent_results[other_agent_name][0]['track_instances']
                 ego2other_rt = other_agent_results[other_agent_name][0]['ego2other_rt']
                 other_agent_pc_range = other_agent_results[other_agent_name][0]['pc_range']
+                physical_shift = other_agent_results[other_agent_name][0].get('physical_shift', None)
                 track_nums_src = len(track_instances)
-                track_instances = self.cross_agent_query_interaction(other_agent_track_instances, track_instances, ego2other_rt, other_agent_pc_range)
+                track_instances = self.cross_agent_query_interaction(
+                    other_agent_track_instances, track_instances, ego2other_rt,
+                    other_agent_pc_range, physical_shift=physical_shift)
                 track_nums_new = len(track_instances)
                 add_nums = track_nums_new - track_nums_src
 
                 bev_embed,bev_pos = self._get_coop_bev_embed(bev_embed, bev_pos, track_instances, track_nums_new-add_nums)
+                bev_embed = self.cross_agent_query_interaction.adapt_bev_embed(
+                    bev_embed, physical_shift=physical_shift)
 
         det_output = self.pts_bbox_head.get_detections(
             bev_embed, 
@@ -969,4 +1083,3 @@ class UniV2XTrack(MVXTwoStageDetector):
             result_dict = None
 
         return [result_dict]
-

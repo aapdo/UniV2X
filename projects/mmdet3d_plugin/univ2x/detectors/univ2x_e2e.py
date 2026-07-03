@@ -71,6 +71,24 @@ class UniV2X(UniV2XTrack):
         self.read_track_query_file_root = read_track_query_file_root
 
         self.is_ego_agent = is_ego_agent
+        self._apply_physical_adapter_trainable_filter()
+
+    def _apply_physical_adapter_trainable_filter(self):
+        configs = [
+            (getattr(self, 'physical_query_adapter_cfg', None), 'physical_query_adapter'),
+            (getattr(self, 'physical_image_adapter_cfg', None), 'physical_image_adapter'),
+        ]
+        trainable_keys = []
+        for cfg, default_key in configs:
+            if not cfg or not cfg.get('enabled', False):
+                continue
+            if not cfg.get('freeze_non_adapter', False):
+                continue
+            trainable_keys.extend(cfg.get('trainable_keys', [default_key]))
+        if not trainable_keys:
+            return
+        for name, param in self.named_parameters():
+            param.requires_grad = any(key in name for key in trainable_keys)
 
 
     @property

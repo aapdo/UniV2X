@@ -28,6 +28,22 @@ from mmcv.utils import TORCH_VERSION, digit_version
 
 from projects.mmdet3d_plugin.univ2x.detectors.multi_agent import MultiAgent
 
+try:
+    import inspect
+    import mmcv.utils.config as mmcv_config
+    from yapf.yapflib import yapf_api
+
+    if 'verify' not in inspect.signature(yapf_api.FormatCode).parameters:
+        _format_code = yapf_api.FormatCode
+
+        def _format_code_compat(*args, verify=None, **kwargs):
+            return _format_code(*args, **kwargs)
+
+        yapf_api.FormatCode = _format_code_compat
+        mmcv_config.FormatCode = _format_code_compat
+except Exception:
+    pass
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a detector')

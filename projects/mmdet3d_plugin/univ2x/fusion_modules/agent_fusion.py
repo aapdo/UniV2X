@@ -12,9 +12,126 @@ from scipy.optimize import linear_sum_assignment
 from ..dense_heads.track_head_plugin import Instances
 
 
+class PhysicalQueryAdapter(nn.Module):
+    """Small metadata-conditioned rank adapter for physical-shift features."""
+
+    def __init__(self, feature_dim, rank=8, metadata_dim=8, hidden_dim=64,
+                 residual_scale=1.0, init_std=1e-4,
+                 metadata_ablation=None):
+        super(PhysicalQueryAdapter, self).__init__()
+        self.feature_dim = int(feature_dim)
+        self.rank = int(rank)
+        self.metadata_dim = int(metadata_dim)
+        self.residual_scale = float(residual_scale)
+        self.init_std = float(init_std)
+        self.metadata_ablation = metadata_ablation or dict(mode='full')
+
+        self.down = nn.Linear(self.feature_dim, self.rank, bias=False)
+        self.up = nn.Linear(self.rank, self.feature_dim, bias=False)
+        self.gate = nn.Sequential(
+            nn.Linear(self.feature_dim + self.metadata_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.rank),
+        )
+        nn.init.kaiming_uniform_(self.down.weight, a=5 ** 0.5)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.down.weight, a=5 ** 0.5)
+        nn.init.normal_(self.up.weight, mean=0.0, std=self.init_std)
+
+    @staticmethod
+    def _iter_shift_records(physical_shift):
+        if not physical_shift:
+            return []
+        if isinstance(physical_shift, (list, tuple)):
+            records = []
+            for item in physical_shift:
+                records.extend(PhysicalQueryAdapter._iter_shift_records(item))
+            return records
+        if not isinstance(physical_shift, dict):
+            return []
+        if physical_shift.get('name', '') in [
+                'compound', 'missing_modality', 'modality_dropout',
+                'unseen_sensor_setup']:
+            return PhysicalQueryAdapter._iter_shift_records(physical_shift.get('shifts', []))
+        return [physical_shift]
+
+    def _pack_metadata(self, physical_shift, device, dtype):
+        values = [0.0 for _ in range(self.metadata_dim)]
+        for shift in self._iter_shift_records(physical_shift):
+            severity = float(shift.get('severity', 0))
+            values[0] = max(values[0], min(severity / 3.0, 1.0))
+
+            if 'yaw_deg' in shift and self.metadata_dim > 1:
+                values[1] = max(values[1], min(abs(float(shift['yaw_deg'])) / 5.0, 1.0))
+            if 'translation_m' in shift and self.metadata_dim > 2:
+                trans = shift.get('translation_m', [0.0, 0.0, 0.0])
+                trans_mag = sum(float(v) ** 2 for v in trans[:3]) ** 0.5
+                values[2] = max(values[2], min(trans_mag / 1.0, 1.0))
+            if 'keep_ratio' in shift and self.metadata_dim > 3:
+                values[3] = max(values[3], 1.0 - float(shift['keep_ratio']))
+            if 'drop_probability' in shift and self.metadata_dim > 4:
+                values[4] = max(values[4], float(shift['drop_probability']))
+            if 'timestamp_delay_s' in shift and self.metadata_dim > 5:
+                values[5] = max(values[5], min(float(shift['timestamp_delay_s']) / 2.0, 1.0))
+            if 'effective_frame_delay' in shift and self.metadata_dim > 6:
+                values[6] = max(values[6], min(float(shift['effective_frame_delay']) / 3.0, 1.0))
+            if shift.get('label_preserving', False) and self.metadata_dim > 7:
+                values[7] = 1.0
+        values = self._apply_metadata_ablation(values)
+        return torch.tensor(values, device=device, dtype=dtype)
+
+    def _apply_metadata_ablation(self, values):
+        mode = str(self.metadata_ablation.get('mode', 'full'))
+        aliases = {
+            'none': 'metadata_free',
+            'zero': 'metadata_free',
+            'free': 'metadata_free',
+            'known': 'full',
+            'all': 'full',
+            'sensor_only': 'availability_only',
+            'sensor_degradation_only': 'availability_only',
+        }
+        mode = aliases.get(mode, mode)
+        if mode == 'full':
+            return values
+        if mode == 'metadata_free':
+            return [0.0 for _ in values]
+        if mode in ('shuffled', 'wrong'):
+            default_perm = [5, 6, 3, 4, 1, 2, 0, 7]
+            perm = self.metadata_ablation.get('permutation', default_perm)
+            out = [0.0 for _ in values]
+            for dst_idx, src_idx in enumerate(perm[:len(values)]):
+                if 0 <= int(src_idx) < len(values):
+                    out[dst_idx] = values[int(src_idx)]
+            return out
+
+        group_indices = {
+            'severity_only': [0],
+            'geometry_only': [1, 2],
+            'temporal_only': [5, 6],
+            'availability_only': [3, 4],
+            'label_only': [7],
+        }
+        keep = self.metadata_ablation.get('active_indices', group_indices.get(mode, []))
+        keep = {int(idx) for idx in keep if 0 <= int(idx) < len(values)}
+        return [value if idx in keep else 0.0 for idx, value in enumerate(values)]
+
+    def forward(self, features, physical_shift=None):
+        if features.numel() == 0:
+            return features
+        metadata = self._pack_metadata(physical_shift, features.device, features.dtype)
+        pooled = features.mean(dim=0)
+        gate_in = torch.cat([pooled, metadata], dim=-1)
+        gate = torch.sigmoid(self.gate(gate_in)).unsqueeze(0)
+        residual = self.up(self.down(features) * gate) * self.residual_scale
+        return features + residual
+
+
 class AgentQueryFusion(nn.Module):
 
-    def __init__(self, pc_range, embed_dims=256):
+    def __init__(self, pc_range, embed_dims=256, physical_query_adapter=None):
         super(AgentQueryFusion, self).__init__()
 
         self.pc_range = pc_range
@@ -26,11 +143,24 @@ class AgentQueryFusion(nn.Module):
         self.cross_agent_align = nn.Linear(self.embed_dims+9, self.embed_dims)
         self.cross_agent_align_pos = nn.Linear(self.embed_dims+9, self.embed_dims)
         self.cross_agent_fusion = nn.Linear(self.embed_dims, self.embed_dims)
+        self.physical_query_adapter = None
+        self.physical_query_adapter_position = 'pre_fusion'
+        if physical_query_adapter and physical_query_adapter.get('enabled', False):
+            adapter_cfg = physical_query_adapter.copy()
+            adapter_cfg.pop('enabled', None)
+            adapter_cfg.pop('freeze_non_adapter', None)
+            adapter_cfg.pop('trainable_keys', None)
+            self.physical_query_adapter_position = adapter_cfg.pop(
+                'position', 'pre_fusion')
+            self.physical_query_adapter = PhysicalQueryAdapter(
+                feature_dim=self.embed_dims, **adapter_cfg)
 
         # parameter initialization
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+        if self.physical_query_adapter is not None:
+            self.physical_query_adapter.reset_parameters()
     
     def _loc_norm(self, locs, pc_range):
         """
@@ -107,7 +237,14 @@ class AgentQueryFusion(nn.Module):
             if cost_matrix[veh_idx[i]][inf_idx[i]] < 1e5:
                 veh_accept_idx.append(veh_idx[i])
                 inf_accept_idx.append(inf_idx[i])
-                veh.query[veh_idx[i], self.embed_dims:] = veh.query[veh_idx[i], self.embed_dims:] + self.cross_agent_fusion(inf.query[inf_idx[i], self.embed_dims:])
+        if veh_accept_idx:
+            fused_query = veh.query.clone()
+            for veh_i, inf_i in zip(veh_accept_idx, inf_accept_idx):
+                fused_query[veh_i, self.embed_dims:] = (
+                    fused_query[veh_i, self.embed_dims:] +
+                    self.cross_agent_fusion(inf.query[inf_i, self.embed_dims:])
+                )
+            veh.query = fused_query
         
         return veh, veh_accept_idx, inf_accept_idx
     
@@ -127,8 +264,19 @@ class AgentQueryFusion(nn.Module):
 
         return veh
 
+    def adapt_bev_embed(self, bev_embed, physical_shift=None):
+        if (self.physical_query_adapter is None or
+                self.physical_query_adapter_position != 'bev_post_fusion'):
+            return bev_embed
+        original_shape = bev_embed.shape
+        bev_feat = bev_embed.reshape(-1, original_shape[-1])
+        bev_feat = self.physical_query_adapter(
+            bev_feat, physical_shift=physical_shift)
+        return bev_feat.reshape(original_shape)
+
     
-    def forward(self, inf, veh, ego2other_rt, other_agent_pc_range, threshold=0.3):
+    def forward(self, inf, veh, ego2other_rt, other_agent_pc_range, threshold=0.3,
+                physical_shift=None):
         """
         Query-based cross-agent interaction: only update ref_pts and query.
 
@@ -187,13 +335,27 @@ class AgentQueryFusion(nn.Module):
 
         # cross-agent feature alignment
         inf2veh_r = calib_inf2veh[:3,:3].reshape(1,9).repeat(inf.query.shape[0], 1)
-        inf.query[..., :self.embed_dims] = self.cross_agent_align_pos(torch.cat([inf.query[..., :self.embed_dims],inf2veh_r], -1))
-        inf.query[..., self.embed_dims:] = self.cross_agent_align(torch.cat([inf.query[..., self.embed_dims:],inf2veh_r], -1))
+        inf_query_pos = self.cross_agent_align_pos(
+            torch.cat([inf.query[..., :self.embed_dims], inf2veh_r], -1))
+        inf_query_feat = self.cross_agent_align(
+            torch.cat([inf.query[..., self.embed_dims:], inf2veh_r], -1))
+        if (self.physical_query_adapter is not None and
+                self.physical_query_adapter_position == 'pre_fusion'):
+            inf_query_feat = self.physical_query_adapter(
+                inf_query_feat, physical_shift=physical_shift)
+        inf.query = torch.cat([inf_query_pos, inf_query_feat], dim=-1)
 
         # cross-agent query fusion
         veh, veh_accept_idx, inf_accept_idx = self._query_fusion(inf, veh, inf_idx, veh_idx, cost_matrix)
 
         # cross-agent query complementation
         veh = self._query_complementation(inf, veh, inf_accept_idx)
+
+        if (self.physical_query_adapter is not None and
+                self.physical_query_adapter_position == 'post_fusion'):
+            veh_query_feat = self.physical_query_adapter(
+                veh.query[..., self.embed_dims:], physical_shift=physical_shift)
+            veh.query = torch.cat(
+                [veh.query[..., :self.embed_dims], veh_query_feat], dim=-1)
 
         return veh

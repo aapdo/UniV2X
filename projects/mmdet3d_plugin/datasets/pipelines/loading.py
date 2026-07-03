@@ -1,5 +1,6 @@
 import numpy as np
 import mmcv
+import hashlib
 from mmdet.datasets.builder import PIPELINES
 from einops import rearrange
 from mmdet3d.datasets.pipelines import LoadAnnotations3D
@@ -15,6 +16,44 @@ class LoadPointsFromFile_E2E(LoadPointsFromFile):
         super().__init__(coord_type, load_dim, use_dim, shift_height, use_color, file_client_args)
 
         self.pts_root = pts_root
+
+    @staticmethod
+    def _stable_rng(stable_seed, tag):
+        key = '{}|{}'.format(stable_seed, tag)
+        digest = hashlib.sha256(key.encode('utf-8')).digest()
+        seed = int.from_bytes(digest[:4], byteorder='little', signed=False)
+        return np.random.RandomState(seed)
+
+    def _apply_single_physical_shift(self, points, results, shift):
+        name = shift.get('name', '')
+        if name not in ['lidar_sparsity', 'point_dropout']:
+            return points
+        keep_ratio = float(np.clip(shift.get('keep_ratio', 1.0), 0.0, 1.0))
+        if keep_ratio >= 1.0 or points.shape[0] == 0:
+            return points
+        stable_seed = int(shift.get('stable_seed', shift.get('seed', 0)))
+        rng = self._stable_rng(stable_seed, name)
+        keep_mask = rng.rand(points.shape[0]) < keep_ratio
+        if not keep_mask.any():
+            keep_mask[int(rng.randint(0, points.shape[0]))] = True
+        shifted = points[keep_mask]
+        results.setdefault('physical_shift', {}).update(
+            dict(applied_to='points', point_keep_ratio=keep_ratio,
+                 points_before=int(points.shape[0]), points_after=int(shifted.shape[0])))
+        return shifted
+
+    def _apply_physical_shift(self, points, results):
+        shift = results.get('physical_shift_config', None)
+        if not shift:
+            return points
+        if shift.get('name', '') in [
+                'compound', 'missing_modality', 'modality_dropout',
+                'unseen_sensor_setup']:
+            shifted = points
+            for subshift in shift.get('shifts', []):
+                shifted = self._apply_single_physical_shift(shifted, results, subshift)
+            return shifted
+        return self._apply_single_physical_shift(points, results, shift)
 
     def __call__(self, results):
         """Call function to load points data from file.
@@ -32,6 +71,7 @@ class LoadPointsFromFile_E2E(LoadPointsFromFile):
         points = self._load_points(pts_filename)
         points = points.reshape(-1, self.load_dim)
         points = points[:, self.use_dim]
+        points = self._apply_physical_shift(points, results)
         attribute_dims = None
 
         if self.shift_height:
@@ -108,6 +148,95 @@ class LoadMultiViewImageFromFilesInCeph(object):
         self.file_client = mmcv.FileClient(**self.file_client_args)
         self.img_root = img_root
 
+    @staticmethod
+    def _stable_rng(stable_seed, tag, view_idx):
+        key = '{}|{}|{}'.format(stable_seed, tag, view_idx)
+        digest = hashlib.sha256(key.encode('utf-8')).digest()
+        seed = int.from_bytes(digest[:4], byteorder='little', signed=False)
+        return np.random.RandomState(seed)
+
+    @staticmethod
+    def _apply_fov_mask(img, keep_ratio, axis='horizontal'):
+        keep_ratio = float(np.clip(keep_ratio, 0.0, 1.0))
+        if keep_ratio >= 1.0:
+            return img
+        shifted = img.copy()
+        h, w = shifted.shape[:2]
+        if axis == 'vertical':
+            keep_h = max(1, int(round(h * keep_ratio)))
+            top = max(0, (h - keep_h) // 2)
+            bottom = min(h, top + keep_h)
+            shifted[:top, ...] = 0
+            shifted[bottom:, ...] = 0
+        else:
+            keep_w = max(1, int(round(w * keep_ratio)))
+            left = max(0, (w - keep_w) // 2)
+            right = min(w, left + keep_w)
+            shifted[:, :left, ...] = 0
+            shifted[:, right:, ...] = 0
+        return shifted
+
+    def _apply_single_physical_shift(self, images, results, shift):
+        name = shift.get('name', '')
+        stable_seed = int(shift.get('stable_seed', shift.get('seed', 0)))
+        if name == 'fov_mask':
+            keep_ratio = shift.get('keep_ratio', 1.0)
+            axis = shift.get('mask_axis', 'horizontal')
+            shifted = [
+                self._apply_fov_mask(img, keep_ratio, axis=axis)
+                for img in images
+            ]
+            results.setdefault('physical_shift', {}).update(
+                dict(applied_to='image', num_views=len(shifted)))
+            return shifted
+
+        if name in ['missing_camera', 'camera_dropout']:
+            p = float(np.clip(shift.get('drop_probability', 0.0), 0.0, 1.0))
+            ensure_one_view = bool(shift.get('ensure_one_view', False))
+            drop_views = []
+            shifted = []
+            for view_idx, img in enumerate(images):
+                rng = self._stable_rng(stable_seed, name, view_idx)
+                should_drop = bool(rng.rand() < p)
+                if should_drop:
+                    drop_views.append(view_idx)
+                    shifted.append(np.zeros_like(img))
+                else:
+                    shifted.append(img)
+            if ensure_one_view and len(drop_views) == len(images) and images:
+                rng = self._stable_rng(stable_seed, '{}_keep_one'.format(name), 0)
+                keep_idx = int(rng.randint(0, len(images)))
+                shifted[keep_idx] = images[keep_idx]
+                drop_views.remove(keep_idx)
+            results.setdefault('physical_shift', {}).update(
+                dict(applied_to='image', dropped_views=drop_views,
+                     num_views=len(shifted)))
+            return shifted
+
+        return images
+
+    def _apply_physical_shift(self, images, results):
+        shift = results.get('physical_shift_config', None)
+        if not shift:
+            return images
+
+        if shift.get('name', '') in [
+                'compound', 'missing_modality', 'modality_dropout',
+                'unseen_sensor_setup']:
+            shifted = images
+            applied = []
+            for subshift in shift.get('shifts', []):
+                before = shifted
+                shifted = self._apply_single_physical_shift(shifted, results, subshift)
+                if shifted is not before:
+                    applied.append(subshift.get('name', ''))
+            results.setdefault('physical_shift', {}).update(
+                dict(applied_to='image', image_shift_sequence=applied,
+                     num_views=len(shifted)))
+            return shifted
+
+        return self._apply_single_physical_shift(images, results, shift)
+
     def __call__(self, results):
         """Call function to load multi-view image from files.
 
@@ -136,6 +265,7 @@ class LoadMultiViewImageFromFilesInCeph(object):
             elif self.file_client_args['backend'] == 'disk':
                 img = mmcv.imread(img_path, self.color_type)
             images_multiView.append(img)
+        images_multiView = self._apply_physical_shift(images_multiView, results)
         # img is of shape (h, w, c, num_views)
         img = np.stack(
             #[mmcv.imread(name, self.color_type) for name in filename], axis=-1)

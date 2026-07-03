@@ -103,9 +103,21 @@ other_agent_names = ['model_other_agent_inf']
 other_agent_output_names = ['track_instances']
 other_agent_model_frozen = True
 is_ego_agent = False
+physical_image_adapter = dict(
+    enabled=False,
+    feature_dim=_dim_,
+    rank=8,
+    metadata_dim=8,
+    hidden_dim=64,
+    residual_scale=1.0,
+    init_std=1e-4,
+    freeze_non_adapter=False,
+    trainable_keys=['physical_image_adapter'],
+)
 
 model_other_agent_inf = dict(
     type="UniV2X",
+    physical_image_adapter=physical_image_adapter,
     gt_iou_threshold=train_gt_iou_threshold,
     queue_length=queue_length,
     use_grid_mask=True,
@@ -518,9 +530,21 @@ model_other_agent_inf = dict(
 #------------------------------------------------------------------------------------------------------------------#
 is_cooperation = True
 is_ego_agent = True
+physical_query_adapter = dict(
+    enabled=False,
+    rank=8,
+    metadata_dim=8,
+    hidden_dim=64,
+    residual_scale=1.0,
+    init_std=1e-4,
+    freeze_non_adapter=False,
+    trainable_keys=['physical_query_adapter'],
+)
 model_ego_agent = dict(
     type="UniV2X",
     is_cooperation=is_cooperation,
+    physical_query_adapter=physical_query_adapter,
+    physical_image_adapter=physical_image_adapter,
     gt_iou_threshold=train_gt_iou_threshold,
     queue_length=queue_length,
     use_grid_mask=True,
@@ -951,6 +975,7 @@ ann_file_test = info_root + f"spd_infos_temporal_val.pkl"
 split_datas_file = "./data/split_datas/cooperative-split-data-spd.json"
 v2x_side = 'cooperative'
 eval_mod = ['det', 'map', 'track', 'motion']
+physical_shift = dict(enabled=False)
 
 train_pipeline = [
     dict(type="LoadMultiViewImageFromFilesInCeph", to_float32=True, file_client_args=file_client_args, img_root=data_root),
@@ -1022,7 +1047,7 @@ train_pipeline = [
                             'img_norm_cfg', 'pcd_trans', 'sample_idx', 'sample_idx_inf','prev_idx', 'next_idx',
                             'pcd_scale_factor', 'pcd_rotation', 'pts_filename',
                             'transformation_3d_flow', 'scene_token',
-                            'can_bus',
+                            'can_bus', 'physical_shift',
                             ),
     ),
 ]
@@ -1083,7 +1108,7 @@ test_pipeline = [
                                             'img_norm_cfg', 'pcd_trans', 'sample_idx', 'sample_idx_inf','prev_idx', 'next_idx',
                                             'pcd_scale_factor', 'pcd_rotation', 'pts_filename',
                                             'transformation_3d_flow', 'scene_token',
-                                            'can_bus',
+                                            'can_bus', 'physical_shift',
                                             ),
             ),
         ],
@@ -1123,7 +1148,8 @@ data = dict(
         split_datas_file=split_datas_file,
         v2x_side=v2x_side,
         class_range=class_range,
-        other_agent_names=other_agent_names
+        other_agent_names=other_agent_names,
+        physical_shift=physical_shift
     ),
     val=dict(
         type=dataset_type,
@@ -1151,7 +1177,8 @@ data = dict(
         split_datas_file=split_datas_file,
         v2x_side=v2x_side,
         class_range=class_range,
-        other_agent_names=other_agent_names
+        other_agent_names=other_agent_names,
+        physical_shift=physical_shift
     ),
     test=dict(
         type=dataset_type,
@@ -1176,7 +1203,8 @@ data = dict(
         split_datas_file=split_datas_file,
         v2x_side=v2x_side,
         class_range=class_range,
-        other_agent_names=other_agent_names
+        other_agent_names=other_agent_names,
+        physical_shift=physical_shift
     ),
     shuffler_sampler=dict(type="DistributedGroupSampler"),
     nonshuffler_sampler=dict(type="DistributedSampler"),

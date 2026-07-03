@@ -126,8 +126,16 @@ def custom_train_detector(model,
     # fp16 setting
     fp16_cfg = cfg.get('fp16', None)
     if fp16_cfg is not None:
-        optimizer_config = Fp16OptimizerHook(
-            **cfg.optimizer_config, **fp16_cfg, distributed=distributed)
+        optimizer_config_cfg = cfg.optimizer_config.copy()
+        hook_type = optimizer_config_cfg.pop('type', None)
+        if hook_type is not None:
+            optimizer_config_cfg.update(fp16_cfg)
+            optimizer_config_cfg.update(distributed=distributed)
+            optimizer_config = build_from_cfg(
+                dict(type=hook_type, **optimizer_config_cfg), HOOKS)
+        else:
+            optimizer_config = Fp16OptimizerHook(
+                **optimizer_config_cfg, **fp16_cfg, distributed=distributed)
     elif distributed and 'type' not in cfg.optimizer_config:
         optimizer_config = OptimizerHook(**cfg.optimizer_config)
     else:
@@ -192,4 +200,3 @@ def custom_train_detector(model,
     elif cfg.load_from:
         runner.load_checkpoint(cfg.load_from)
     runner.run(data_loaders, cfg.workflow)
-

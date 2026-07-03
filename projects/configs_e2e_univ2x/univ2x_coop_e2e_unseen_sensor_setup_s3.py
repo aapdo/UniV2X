@@ -1,0 +1,23 @@
+_base_ = './univ2x_coop_e2e.py'
+
+physical_shift = dict(
+    enabled=True,
+    name='unseen_sensor_setup',
+    severity=3,
+    seed=42,
+    target_agents=['model_other_agent_inf'],
+    metadata_mode='known',
+    fov_keep_ratio=0.55,
+    lidar_keep_ratio=0.10,
+    yaw_deg=2.0,
+    translation_m=0.20,
+    frame_delay=2,
+    camera_drop_probability=0.25,
+    ensure_one_view=False,
+)
+
+data = dict(
+    train=dict(physical_shift=physical_shift),
+    val=dict(physical_shift=physical_shift, eval_mod=[]),
+    test=dict(physical_shift=physical_shift, eval_mod=[]),
+)

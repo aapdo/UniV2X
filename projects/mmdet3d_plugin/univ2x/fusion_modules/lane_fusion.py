@@ -9,6 +9,8 @@ import torch.nn.functional as F
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from ..utils import fusion_audit
+
 class LaneQueryFusion(nn.Module):
     def __init__(self, pc_range, embed_dims=256):
         super(LaneQueryFusion, self).__init__()
@@ -78,18 +80,28 @@ class LaneQueryFusion(nn.Module):
 
     def forward(self, other_outputs_classes, other_outputs_coords, other_query, other_query_pos, other_reference,
                                     veh_outputs_classes, veh_outputs_coords, veh_query, veh_query_pos, veh_reference,
-                                    ego2other_rt, other_agent_pc_range, threshold=0.05):
+                                    ego2other_rt, other_agent_pc_range, threshold=0.05,
+                                    physical_shift=None):
         '''
         reference: (x, y, w, h), reference = inverse_sigmoid(reference)
         outputs_coords: (x, y, w, h), outputs_coords = outputs_coords.sigmoid()
         '''
         calib_other2ego = np.linalg.inv(ego2other_rt[0].cpu().numpy().T)
         calib_other2ego = torch.tensor(calib_other2ego).to(other_query)
+        audit_metrics = {
+            'veh_lane_query_count_input': int(veh_query.shape[1]),
+            'infra_lane_query_count_input': int(other_query.shape[1]),
+            'lane_score_threshold': float(threshold),
+        }
 
         # UniV2X TODO: hardcode for filtering inf queries with scores
         # UniV2X TODO: supposed that img num = 1
         other_cls_scores = other_outputs_classes[-1]
+        other_lane_scores = other_cls_scores.sigmoid().max(-1)[0]
+        audit_metrics.update(fusion_audit.tensor_stats(
+            'infra_lane_score_input', other_lane_scores))
         other_bbox_index = self.filter_other_lanes(other_cls_scores, threshold=threshold)
+        audit_metrics['infra_lane_filtered_count'] = int(other_bbox_index.numel())
         other_outputs_classes = other_outputs_classes[:, :, other_bbox_index, :]
         other_outputs_coords = other_outputs_coords[:, :, other_bbox_index, :]
         other_query = other_query[:, other_bbox_index, :]
@@ -137,5 +149,11 @@ class LaneQueryFusion(nn.Module):
         other_query = torch.cat((veh_query, other_query), dim=1)
         other_query_pos = torch.cat((veh_query_pos, other_query_pos), dim=1)
         other_reference = torch.cat((veh_reference, other_reference), dim=1)
+        audit_metrics.update({
+            'lane_concat_added_count': int(other_bbox_index.numel()),
+            'lane_query_count_output': int(other_query.shape[1]),
+        })
+        fusion_audit.emit(
+            'lane', 'fusion', audit_metrics, physical_shift=physical_shift)
 
         return other_outputs_classes, other_outputs_coords, other_query, other_query_pos, other_reference

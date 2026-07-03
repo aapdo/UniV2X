@@ -10,6 +10,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from ..dense_heads.track_head_plugin import Instances
+from ..utils import fusion_audit
 
 
 class PhysicalQueryAdapter(nn.Module):
@@ -284,9 +285,24 @@ class AgentQueryFusion(nn.Module):
         veh: Instance from vehicle
         ego2other_rt: calibration parameters from infrastructure to vehicle
         """
+        audit_metrics = {
+            'veh_query_count_input': len(veh),
+            'infra_query_count_input': len(inf),
+        }
+        if getattr(inf, 'scores', None) is not None:
+            audit_metrics.update(fusion_audit.tensor_stats(
+                'infra_score_input', inf.scores))
+        if getattr(veh, 'scores', None) is not None:
+            audit_metrics.update(fusion_audit.tensor_stats(
+                'veh_score_input', veh.scores))
+
         inf_mask = torch.where(inf.obj_idxes>=0)
+        audit_metrics['infra_obj_idx_valid_count'] = int(inf_mask[0].numel())
         inf = inf[inf_mask]
         if len(inf) == 0:
+            fusion_audit.emit(
+                'agent', 'no_valid_infra_query', audit_metrics,
+                physical_shift=physical_shift)
             return veh
         inf_mask_new = torch.where(inf.obj_idxes>=0)
         
@@ -306,6 +322,7 @@ class AgentQueryFusion(nn.Module):
         # ego_selection
         remove_ego_ins = True
         if remove_ego_ins:
+            infra_count_before_ego_filter = len(inf)
             H_B, H_F = -2.04, 2.04 # H = 4.084
             W_L, W_R = -0.92, 0.92 # W = 1.85
             def del_tensor_ele(arr,index):
@@ -322,10 +339,25 @@ class AgentQueryFusion(nn.Module):
             inf_mask_new = tuple(inf_mask_new)
             inf = inf[inf_mask_new]
             inf_ref_pts = inf_ref_pts[inf_mask_new]
+            audit_metrics['infra_ego_box_removed_count'] = (
+                infra_count_before_ego_filter - len(inf))
+        audit_metrics['infra_after_spatial_filter_count'] = len(inf)
 
         # matching
         veh_mask = torch.where(veh.scores >= 0.05)[0]
         veh_idx, inf_idx, cost_matrix = self._query_matching(inf_ref_pts, veh_ref_pts, veh_mask, veh.pred_boxes[..., [2,3,5]]) # veh.pred_boxes x,y,dx,dy,z,dz
+        finite_costs = cost_matrix[cost_matrix < 1e6]
+        candidate_count = int(len(veh_mask) * len(inf))
+        audit_metrics.update({
+            'veh_score_ge_005_count': int(len(veh_mask)),
+            'match_candidate_count': candidate_count,
+            'match_finite_candidate_count': int(finite_costs.size),
+            'match_distance_gate_reject_count': (
+                candidate_count - int(finite_costs.size)),
+            'match_hungarian_pair_count': int(len(veh_idx)),
+        })
+        audit_metrics.update(fusion_audit.tensor_stats(
+            'match_cost_finite', finite_costs))
 
         # ref_pts normalization
         inf_ref_pts = self._loc_norm(inf_ref_pts, self.pc_range)
@@ -347,9 +379,22 @@ class AgentQueryFusion(nn.Module):
 
         # cross-agent query fusion
         veh, veh_accept_idx, inf_accept_idx = self._query_fusion(inf, veh, inf_idx, veh_idx, cost_matrix)
+        audit_metrics.update({
+            'match_accepted_count': int(len(veh_accept_idx)),
+            'match_rejected_count': int(len(veh_idx) - len(veh_accept_idx)),
+            'match_accept_rate_over_candidates': (
+                float(len(veh_accept_idx)) / max(candidate_count, 1)),
+            'match_accept_rate_over_hungarian': (
+                float(len(veh_accept_idx)) / max(len(veh_idx), 1)),
+        })
 
         # cross-agent query complementation
+        veh_count_before_complement = len(veh)
         veh = self._query_complementation(inf, veh, inf_accept_idx)
+        audit_metrics.update({
+            'complement_added_count': int(len(veh) - veh_count_before_complement),
+            'veh_query_count_output': int(len(veh)),
+        })
 
         if (self.physical_query_adapter is not None and
                 self.physical_query_adapter_position == 'post_fusion'):
@@ -357,5 +402,8 @@ class AgentQueryFusion(nn.Module):
                 veh.query[..., self.embed_dims:], physical_shift=physical_shift)
             veh.query = torch.cat(
                 [veh.query[..., :self.embed_dims], veh_query_feat], dim=-1)
+
+        fusion_audit.emit(
+            'agent', 'fusion', audit_metrics, physical_shift=physical_shift)
 
         return veh

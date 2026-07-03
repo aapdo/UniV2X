@@ -9,9 +9,21 @@ from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
 import copy
 from .occ_head_plugin import MLP, BevFeatureSlicer, SimpleConv2d, CVT_Decoder, Bottleneck, UpsamplingAdd, \
                              predict_instance_segmentation_and_trajectories
+from ..utils import fusion_audit
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+
+
+def _occ_audit_stats(prefix, occ, threshold):
+    metrics = fusion_audit.tensor_stats(prefix, occ)
+    try:
+        occ_detached = occ.detach().float()
+        metrics[prefix + '_mass_sum'] = occ_detached.sum().item()
+        metrics[prefix + '_occupied_count'] = int((occ_detached > threshold).sum().item())
+    except Exception:
+        pass
+    return metrics
 
 @HEADS.register_module()
 class OccHead(BaseModule):
@@ -484,7 +496,28 @@ class OccHead(BaseModule):
                     import pdb;pdb.set_trace()
                 other_agent_occ_data = other_agent_results[other_agent_name][0]['occ']['univ2x_occ_prob_data']
                 other_agent_occ_data = torch.stack([other_agent_occ_data], dim=0)
-                new_pred_seg_scores, new_inf_occ = self.occ_prob_fusion(pred_seg_scores, other_agent_occ_data, other_agent_results[other_agent_name][0]['ego2other_rt'])   # [1, t, h, w]   
+                physical_shift = other_agent_results[other_agent_name][0].get('physical_shift', None)
+                audit_metrics = {}
+                audit_metrics.update(_occ_audit_stats(
+                    'ego_occ_prob_before_fusion', pred_seg_scores,
+                    self.test_seg_thresh))
+                audit_metrics.update(_occ_audit_stats(
+                    'infra_occ_prob_input', other_agent_occ_data,
+                    self.test_seg_thresh))
+                new_pred_seg_scores, new_inf_occ = self.occ_prob_fusion(pred_seg_scores, other_agent_occ_data, other_agent_results[other_agent_name][0]['ego2other_rt'])   # [1, t, h, w]
+                audit_metrics.update(_occ_audit_stats(
+                    'infra_occ_binary_after_warp', new_inf_occ, 0.5))
+                audit_metrics.update(_occ_audit_stats(
+                    'fused_occ_binary', new_pred_seg_scores, 0.5))
+                try:
+                    audit_metrics['fused_minus_ego_mass_sum'] = (
+                        new_pred_seg_scores.detach().float().sum() -
+                        pred_seg_scores.detach().float().sum()).item()
+                except Exception:
+                    pass
+                fusion_audit.emit(
+                    'occ', 'fusion', audit_metrics,
+                    physical_shift=physical_shift)
                 pred_seg_scores = new_pred_seg_scores
         
         seg_out = (pred_seg_scores > self.test_seg_thresh).long().unsqueeze(2)  # [b, t, 1, h, w]

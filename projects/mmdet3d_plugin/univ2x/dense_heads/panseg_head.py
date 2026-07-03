@@ -314,15 +314,18 @@ class PansegformerHead(SegDETRHead):
                     other_agent_lane_data = other_agent_result['univ2x_lane_query_data']
                     ego2other_rt = other_agent_results[other_agent_name]['ego2other_rt']
                     other_agent_pc_range = other_agent_results[other_agent_name]['pc_range']
+                    physical_shift = other_agent_result.get('physical_shift', None)
                 else:
                     other_agent_lane_data = other_agent_result[0]['univ2x_lane_query_data']
                     ego2other_rt = other_agent_results[other_agent_name][0]['ego2other_rt']
-                    other_agent_pc_range = other_agent_results[other_agent_name][0]['pc_range']                   
+                    other_agent_pc_range = other_agent_results[other_agent_name][0]['pc_range']
+                    physical_shift = other_agent_result[0].get('physical_shift', None)
                 outputs_classes, outputs_coords, query, query_pos, reference = self.cross_lane_fusion(
                     other_agent_lane_data['outputs_classes'], other_agent_lane_data['outputs_coords'], other_agent_lane_data['query'], 
                     other_agent_lane_data['query_pos'], other_agent_lane_data['reference'],
                     outputs_classes, outputs_coords, query, query_pos, reference,
-                    ego2other_rt, other_agent_pc_range
+                    ego2other_rt, other_agent_pc_range,
+                    physical_shift=physical_shift
                 )
                 if self.is_bev_aug:
                     memory, memory_pos = self. _get_coop_bev_embed(memory, memory_pos, query, query_pos, reference)

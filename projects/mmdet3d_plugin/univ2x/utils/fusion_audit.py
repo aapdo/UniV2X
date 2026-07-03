@@ -10,6 +10,7 @@ import torch
 
 _LOCK = threading.Lock()
 _EVENT_COUNT = 0
+_WANDB_INIT_TRIED = False
 
 
 def enabled():
@@ -212,6 +213,7 @@ def emit(component, event, metrics=None, physical_shift=None):
 def _log_wandb(component, event, record):
     try:
         import wandb
+        _maybe_init_wandb(wandb)
         if wandb.run is None:
             return
         prefix = 'fusion_audit/{}/{}/'.format(component, event)
@@ -225,6 +227,29 @@ def _log_wandb(component, event, record):
         return
 
 
+def _maybe_init_wandb(wandb):
+    global _WANDB_INIT_TRIED
+    if wandb.run is not None or _WANDB_INIT_TRIED:
+        return
+    _WANDB_INIT_TRIED = True
+    project = os.environ.get(
+        'UNIV2X_FUSION_AUDIT_WANDB_PROJECT',
+        os.environ.get('WANDB_PROJECT', 'adas-e2e-physical-shift'))
+    name = os.environ.get('UNIV2X_FUSION_AUDIT_WANDB_NAME', None)
+    mode = os.environ.get('WANDB_MODE', None)
+    tags = [
+        tag.strip()
+        for tag in os.environ.get(
+            'UNIV2X_FUSION_AUDIT_WANDB_TAGS',
+            'univ2x,fusion-audit,eval').split(',')
+        if tag.strip()
+    ]
+    kwargs = dict(project=project, name=name, tags=tags)
+    if mode:
+        kwargs['mode'] = mode
+    wandb.init(**kwargs)
+
+
 def _log_artifact():
     if not enabled() or not _wandb_enabled() or not _rank_zero():
         return
@@ -233,6 +258,7 @@ def _log_artifact():
         return
     try:
         import wandb
+        _maybe_init_wandb(wandb)
         if wandb.run is None:
             return
         artifact = wandb.Artifact('univ2x-fusion-audit', type='fusion-audit')

@@ -165,6 +165,66 @@ data = dict(
 )
 PY
       ;;
+    calibration_s3)
+      cat > "${cfg}" <<PY
+_base_ = '${CONFIG_ABS}'
+
+physical_shift = dict(
+    enabled=True,
+    name='calibration_drift',
+    severity=3,
+    seed=42,
+    target_agents=['model_other_agent_inf'],
+    metadata_mode='known',
+)
+
+data = dict(
+    train=dict(physical_shift=physical_shift),
+    val=dict(physical_shift=physical_shift, eval_mod=[]),
+    test=dict(physical_shift=physical_shift, eval_mod=[]),
+)
+PY
+      ;;
+    fov_s3)
+      cat > "${cfg}" <<PY
+_base_ = '${CONFIG_ABS}'
+
+physical_shift = dict(
+    enabled=True,
+    name='fov_mask',
+    severity=3,
+    seed=42,
+    target_agents=['model_other_agent_inf'],
+    metadata_mode='known',
+)
+
+data = dict(
+    train=dict(physical_shift=physical_shift),
+    val=dict(physical_shift=physical_shift, eval_mod=[]),
+    test=dict(physical_shift=physical_shift, eval_mod=[]),
+)
+PY
+      ;;
+    lidar_sparsity_s3)
+      cat > "${cfg}" <<PY
+_base_ = '${CONFIG_ABS}'
+
+physical_shift = dict(
+    enabled=True,
+    name='lidar_sparsity',
+    severity=3,
+    seed=42,
+    target_agents=['model_other_agent_inf'],
+    metadata_mode='known',
+)
+
+data = dict(
+    train=dict(physical_shift=physical_shift),
+    val=dict(physical_shift=physical_shift, eval_mod=[]),
+    test=dict(physical_shift=physical_shift, eval_mod=[]),
+)
+PY
+      ;;
     missing_camera_s3)
       cat > "${cfg}" <<PY
 _base_ = '${CONFIG_ABS}'
@@ -256,6 +316,9 @@ settings=(
   clean
   latency_s2
   pose_s3
+  calibration_s3
+  fov_s3
+  lidar_sparsity_s3
   missing_camera_s3
   compound_s3
 )

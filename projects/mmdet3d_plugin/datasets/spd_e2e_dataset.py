@@ -70,6 +70,7 @@ class SPD_E2E_Dataset(NuScenesDataset):
                 split_datas_file="",
                 v2x_side='',
                 new_range_100=False,
+                class_range=class_range,
                 other_agent_names=[],
                 *args,
                 **kwargs):
@@ -82,6 +83,20 @@ class SPD_E2E_Dataset(NuScenesDataset):
             raise Exception('v2x_side is not correct with {}'.format(self.v2x_side))
         self.file_client_args = file_client_args
         self.file_client = mmcv.FileClient(**file_client_args)
+        self.load_interval = kwargs.pop('load_interval', 1)
+
+        legacy_classes = kwargs.pop('classes', None)
+        if legacy_classes is not None:
+            metainfo = dict(kwargs.pop('metainfo', {}) or {})
+            metainfo.setdefault('classes', tuple(legacy_classes))
+            kwargs['metainfo'] = metainfo
+
+        ann_file = kwargs.get('ann_file')
+        if ann_file and not osp.isabs(ann_file) and osp.exists(ann_file):
+            kwargs['ann_file'] = osp.abspath(ann_file)
+        kwargs.pop('samples_per_gpu', None)
+        kwargs.pop('workers_per_gpu', None)
+        kwargs.setdefault('serialize_data', False)
 
         self.tmp_dataset_type = 'spd'
         if self.tmp_dataset_type not in ['spd', 'nuscenes']:
@@ -90,6 +105,12 @@ class SPD_E2E_Dataset(NuScenesDataset):
         self.is_debug = is_debug
         self.len_debug = len_debug
         super().__init__(*args, **kwargs)
+        if not hasattr(self, 'CLASSES') and legacy_classes is not None:
+            self.CLASSES = list(legacy_classes)
+        if not hasattr(self, 'data_infos'):
+            self.data_infos = list(getattr(self, 'data_list', []))
+        if not hasattr(self, 'flag'):
+            self.flag = np.zeros(len(self), dtype=np.uint8)
         self.queue_length = queue_length
         self.overlap_test = overlap_test
         self.bev_size = bev_size
@@ -179,9 +200,14 @@ class SPD_E2E_Dataset(NuScenesDataset):
 
     def __len__(self):
         if not self.is_debug:
-            return len(self.data_infos)
+            if hasattr(self, 'data_infos'):
+                return len(self.data_infos)
+            return len(getattr(self, 'data_list', []))
         else:
             return self.len_debug
+
+    def load_data_list(self):
+        return self.load_annotations(self.ann_file)
 
     def load_annotations(self, ann_file):
         """Load annotations from ann_file.
@@ -209,6 +235,20 @@ class SPD_E2E_Dataset(NuScenesDataset):
         else:
             assert False, 'Invalid file_client_args!'
         return data_infos
+
+    def _rand_another(self, idx=None):
+        return np.random.randint(0, len(self))
+
+    def pre_pipeline(self, results):
+        results['img_fields'] = []
+        results['bbox3d_fields'] = []
+        results['pts_mask_fields'] = []
+        results['pts_seg_fields'] = []
+        results['bbox_fields'] = []
+        results['mask_fields'] = []
+        results['seg_fields'] = []
+        results['box_type_3d'] = self.box_type_3d
+        results['box_mode_3d'] = self.box_mode_3d
 
     def prepare_train_data(self, index, agent_name='ego_vehicle'):
         data = self._prepare_train_data_single(index, agent_name='ego_vehicle')

@@ -512,7 +512,7 @@ model_ego_agent = dict(
 #------------------------------------------------------------------------------------------------------------------#
 file_client_args = dict(backend="disk")
 
-dataset_type = "SPDE2EDataset"
+dataset_type = "SPD_E2E_Dataset"
 data_root = "datasets/V2X-Seq-SPD-New/vehicle-side/"
 info_root = "data/infos/V2X-Seq-SPD-New/vehicle-side/"
 ann_file_train = info_root + f"spd_infos_temporal_train.pkl"

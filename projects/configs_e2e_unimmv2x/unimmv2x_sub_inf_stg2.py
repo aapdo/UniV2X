@@ -340,7 +340,7 @@ model_ego_agent = dict(
         loss_iou=dict(type='GIoULoss', loss_weight=2.0),
         loss_mask=dict(type='DiceLoss', loss_weight=2.0),
         thing_transformer_head=dict(type='SegMaskHead', d_model=_dim_, nhead=8, num_decoder_layers=4),
-        stuff_transformer_head=dict(type='SegMask Head', d_model=_dim_, nhead=8, num_decoder_layers=6, self_attn=True),
+        stuff_transformer_head=dict(type='SegMaskHead', d_model=_dim_, nhead=8, num_decoder_layers=6, self_attn=True),
         train_cfg=dict(
             assigner=dict(
                 type='HungarianAssigner',

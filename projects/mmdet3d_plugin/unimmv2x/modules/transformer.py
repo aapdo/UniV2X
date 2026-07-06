@@ -114,6 +114,24 @@ class PerceptionTransformer(BaseModule):
         """
 
         bs = mlvl_feats[0].size(0)
+        img_metas = list(img_metas or [])
+        if len(img_metas) == 0:
+            img_metas = [dict(can_bus=np.zeros(18, dtype=np.float32))
+                         for _ in range(bs)]
+        elif len(img_metas) < bs:
+            img_metas = img_metas + [img_metas[-1]] * (bs - len(img_metas))
+        elif len(img_metas) > bs:
+            img_metas = img_metas[:bs]
+        for meta in img_metas:
+            can_bus = np.asarray(meta.get('can_bus', []), dtype=np.float32)
+            if can_bus.size < 18:
+                padded_can_bus = np.zeros(18, dtype=np.float32)
+                padded_can_bus[:can_bus.size] = can_bus
+                meta['can_bus'] = padded_can_bus
+            elif can_bus.size > 18:
+                meta['can_bus'] = can_bus[:18]
+            else:
+                meta['can_bus'] = can_bus
         bev_queries = bev_queries.unsqueeze(1).repeat(1, bs, 1)
         bev_pos = bev_pos.flatten(2).permute(2, 0, 1)
         # obtain rotation angle and shift with ego motion
@@ -142,7 +160,7 @@ class PerceptionTransformer(BaseModule):
                 prev_bev = prev_bev.permute(1, 0, 2)
             if self.rotate_prev_bev:
                 for i in range(bs):
-                    rotation_angle = img_metas[i]['can_bus'][-1]
+                    rotation_angle = float(img_metas[i]['can_bus'][-1])
                     tmp_prev_bev = prev_bev[:, i].reshape(
                         bev_h, bev_w, -1).permute(2, 0, 1)
                     tmp_prev_bev = rotate(tmp_prev_bev, rotation_angle,

@@ -481,9 +481,15 @@ class MotionHead(BaseMotionHead):
             matched_gt_fut_traj_mask = gt_fut_traj_mask[i][matched_gt_idx][valid_traj_masks]
             if self.use_nonlinear_optimizer:
                 # TODO: sdc query is not supported non-linear optimizer
-                bboxes = track_bbox_results[i][0].tensor[valid_traj_masks]
-                matched_gt_bboxes_3d = gt_bboxes_3d[i][-1].tensor[matched_gt_idx[:-1]
-                                                                  ][valid_traj_masks[:-1]]
+                bbox_tensor = track_bbox_results[i][0].tensor
+                bbox_valid_masks = valid_traj_masks.to(bbox_tensor.device)
+                bboxes = bbox_tensor[bbox_valid_masks]
+                gt_bbox_tensor = gt_bboxes_3d[i][-1].tensor
+                gt_bbox_idx = matched_gt_idx[:-1].to(gt_bbox_tensor.device)
+                gt_bbox_valid_masks = valid_traj_masks[:-1].to(
+                    gt_bbox_tensor.device)
+                matched_gt_bboxes_3d = gt_bbox_tensor[
+                    gt_bbox_idx][gt_bbox_valid_masks]
                 sdc_gt_fut_traj = matched_gt_fut_traj[-1:]
                 sdc_gt_fut_traj_mask = matched_gt_fut_traj_mask[-1:]
                 matched_gt_fut_traj = matched_gt_fut_traj[:-1]

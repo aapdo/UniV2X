@@ -1,0 +1,17 @@
+name: unimmv2x_h200
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools
+  - wheel
+  - git
+  - ninja
+  - cmake
+  - packaging
+  - pip:
+      - -r h200_setup/requirements_h200_unimmv2x_freeze.txt

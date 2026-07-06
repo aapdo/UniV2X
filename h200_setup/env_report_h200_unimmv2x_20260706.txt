@@ -1,0 +1,123 @@
+# H200 UniMM-V2X environment report
+2026-07-06T22:44:32+09:00
+
+## Git
+## h200-port
+ M projects/configs_e2e_unimmv2x/unimmv2x_sub_inf_stg2.py
+ M projects/configs_e2e_unimmv2x/unimmv2x_sub_vehicle_stg2.py
+ M projects/mmdet3d_plugin/core/bbox/assigners/hungarian_assigner_3d_track.py
+ M projects/mmdet3d_plugin/core/bbox/match_costs/match_cost.py
+ M projects/mmdet3d_plugin/datasets/eval_utils/eval_utils.py
+ M projects/mmdet3d_plugin/datasets/spd_e2e_dataset.py
+ M projects/mmdet3d_plugin/losses/dice_loss.py
+ M projects/mmdet3d_plugin/losses/track_loss.py
+ M projects/mmdet3d_plugin/unimmv2x/dense_heads/motion_head.py
+ M projects/mmdet3d_plugin/unimmv2x/dense_heads/panseg_head.py
+ M projects/mmdet3d_plugin/unimmv2x/dense_heads/seg_head_plugin/seg_assigner.py
+ M projects/mmdet3d_plugin/unimmv2x/dense_heads/seg_head_plugin/seg_detr_head.py
+ M projects/mmdet3d_plugin/unimmv2x/detectors/unimmv2x_track.py
+ M projects/mmdet3d_plugin/unimmv2x/modules/transformer.py
+ M tools/spd_data_converter/spd_to_uniad.py
+?? .gitignore
+?? h200_compat_smoke.py
+?? h200_setup/
+?? requirements_h200_port.txt
+?? tools/h200_train.py
+?? tools/prepare_h200_spd.sh
+?? tools/prepare_h200_spd_parallel.sh
+?? tools/run_h200_spd_full_training_queue.sh
+?? tools/spd_data_converter/nuscenes_jsons/
+?? tools/spd_data_converter/update_label_info.json
+?? tools/unimmv2x_h200_dist_train.sh
+ed207d5 (HEAD -> h200-port, origin/main, origin/HEAD, main) init
+
+## Python/package versions
+torch=2.1.2+cu121
+torchvision=0.16.2+cu121
+mmcv=2.1.0
+mmengine=0.10.7
+mmdet=3.3.0
+mmdet3d=1.4.0
+numpy=1.26.4
+cv2=4.10.0
+torch.cuda 12.1
+cuda.available True
+cuda.device0 NVIDIA H200 NVL
+cuda.capability0 (9, 0)
+mmcv._ext /home/gpu_01/venvs/unimmv2x_h200/lib/python3.10/site-packages/mmcv/_ext.cpython-310-x86_64-linux-gnu.so
+
+## nvidia-smi
+Mon Jul  6 22:44:37 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.82.07              Driver Version: 580.82.07      CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H200 NVL                Off |   00000000:0B:00.0 Off |                    0 |
+| N/A   41C    P0            105W /  600W |   20253MiB / 143771MiB |     91%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   1  NVIDIA H200 NVL                Off |   00000000:33:00.0 Off |                    0 |
+| N/A   40C    P0            100W /  600W |   16217MiB / 143771MiB |     67%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA H200 NVL                Off |   00000000:46:00.0 Off |                    0 |
+| N/A   35C    P0             71W /  600W |       0MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA H200 NVL                Off |   00000000:59:00.0 Off |                    0 |
+| N/A   35C    P0             72W /  600W |       0MiB / 143771MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A         1925437      C   ...envs/unimmv2x_h200/bin/python      16354MiB |
+|    0   N/A  N/A         1997738      C   python3                                3880MiB |
+|    1   N/A  N/A         1925438      C   ...envs/unimmv2x_h200/bin/python      16206MiB |
++-----------------------------------------------------------------------------------------+
+
+## nvcc
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2021 NVIDIA Corporation
+Built on Thu_Nov_18_09:45:30_PST_2021
+Cuda compilation tools, release 11.5, V11.5.119
+Build cuda_11.5.r11.5/compiler.30672275_0
+
+## current_train.env
+STAGE=sub_vehicle_stg2
+RUN_NAME=unimmv2x_sub_vehicle_stg2_h200_g01_b1a4_r43_20260706_1517
+PID=1925303
+EPOCHS=30
+CFG=projects/configs_e2e_unimmv2x/unimmv2x_sub_vehicle_stg2.py
+CONFIG=projects/configs_e2e_unimmv2x/unimmv2x_sub_vehicle_stg2.py
+WORK_DIR=/home/gpu_01/UniMM-V2X/projects/work_dirs_h200_e2e_unimmv2x/unimmv2x_sub_vehicle_stg2
+LOG=/home/gpu_01/UniMM-V2X/logs/h200_train_submit/unimmv2x_sub_vehicle_stg2_h200_g01_b1a4_r43_20260706_1517.nohup.log
+LOG_PATH=/home/gpu_01/UniMM-V2X/logs/h200_train_submit/unimmv2x_sub_vehicle_stg2_h200_g01_b1a4_r43_20260706_1517.nohup.log
+CUDA_VISIBLE_DEVICES=0,1
+BATCH_PER_GPU=1
+ACCUM=4
+GLOBAL_BATCH=8
+MASTER_PORT=60143
+WANDB_PROJECT=unimmv2x-h200-spd
+WANDB_NAME=unimmv2x_sub_vehicle_stg2_h200_g01_b1a4_r43_20260706_1517
+HF_REPO_ID=apdoa/UniMM-V2X-H200-SPD
+HF_PATH_IN_REPO=checkpoints/unimmv2x_sub_vehicle_stg2_h200_g01_b1a4_r43_20260706_1517
+TORCH_CUDA_ARCH_LIST=9.0
+PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+PYTHON_ENV=/home/gpu_01/venvs/unimmv2x_h200
+REQUIRED_INPUT_CHECKPOINTS=ckpts/unimmv2x_veh_stg1.pth
+HANDOFF_CHECKPOINT=ckpts/unimmv2x_veh_stg2.pth
+PREVIOUS_STAGE=sub_inf_stg2
+PREVIOUS_RUN=unimmv2x_sub_inf_stg2_h200_g01_b1a4_r39_20260704_1658
+PREVIOUS_HANDOFF=ckpts/unimmv2x_inf_stg2.pth
+PREVIOUS_FAILED_RUN=unimmv2x_sub_vehicle_stg2_h200_g01_b1a4_r41_20260705_2055
+FIX_APPLIED=unimmv2x_sub_vehicle_stg2.py:dataset_type_SPDE2EDataset_to_SPD_E2E_Dataset
+STATUS=running
+LAUNCHED_AT="2026-07-06 15:17 KST"
+RELAUNCH_REASON="H200 gpu_01 quota recovered; r41 failed with OSError Disk quota exceeded while saving epoch_1.pth"

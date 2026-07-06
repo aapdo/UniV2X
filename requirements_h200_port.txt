@@ -1,0 +1,44 @@
+# UniMM-V2X H200 port environment overlay
+#
+# This is intentionally separate from the upstream requirements.txt.
+# Upstream targets Python 3.8 / torch 1.10 / CUDA 11.3 / OpenMMLab 1.x,
+# which is not usable as-is on H200.  Create a clean env, then install with:
+#
+#   python -m venv ~/venvs/unimmv2x_h200
+#   ~/venvs/unimmv2x_h200/bin/python -m pip install -U pip
+#   ~/venvs/unimmv2x_h200/bin/python -m pip install -r requirements_h200_port.txt
+#
+# Current smoke-test env:
+#   Python 3.10.20
+#   CUDA_VISIBLE_DEVICES=0,1
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+--find-links https://download.openmmlab.com/mmcv/dist/cu121/torch2.1.0/index.html
+
+torch==2.1.2+cu121
+torchvision==0.16.2+cu121
+numpy==1.26.4
+
+# Modern OpenMMLab stack used for the H200 port attempt.
+mmengine==0.10.7
+mmcv==2.1.0
+mmdet==3.3.0
+mmsegmentation==1.2.2
+mmdet3d==1.4.0
+openmim==0.3.9
+
+# UniMM runtime dependencies that were missing or incompatible at import time.
+motmetrics==1.4.0
+einops==0.8.2
+casadi==3.7.2
+torchmetrics==1.9.0
+spconv-cu120==2.3.6
+
+# Pins to keep numpy<2 reproducible with torch 2.1.x and avoid resolver drift.
+opencv-python==4.10.0.84
+plyfile==1.0.3
+
+# Experiment tracking and post-training model upload.
+wandb==0.28.0
+huggingface_hub==1.21.0
+hf_transfer==0.1.9

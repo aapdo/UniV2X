@@ -14,7 +14,6 @@ from nuscenes.eval.common.data_classes import EvalBox, EvalBoxes
 from nuscenes.eval.detection.data_classes import DetectionBox
 from nuscenes.eval.detection.data_classes import DetectionMetricData, DetectionMetricDataList, DetectionMetrics
 from nuscenes.eval.common.utils import center_distance, scale_iou, yaw_diff, velocity_l2, attr_acc, cummean
-from .v2xsim_splits import create_splits_scenes as create_splits_scenes_v2xsim
 
 def category_to_detection_name(category_name: str):
     """
@@ -628,6 +627,7 @@ def load_gt_v2xsim(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = Fal
     sample_tokens_all = [s['token'] for s in nusc.sample]
     assert len(sample_tokens_all) > 0, "Error: Database has no samples!"
 
+    from .v2xsim_splits import create_splits_scenes as create_splits_scenes_v2xsim
     splits = create_splits_scenes_v2xsim()
 
     # Check compatibility of split with nusc_version.

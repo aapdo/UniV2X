@@ -82,7 +82,6 @@ class UniMMV2XTrack(MVXTwoStageDetector):
             pts_bbox_head=pts_bbox_head,
             train_cfg=train_cfg,
             test_cfg=test_cfg,
-            pretrained=pretrained,
         )
 
         self.grid_mask = GridMask(
@@ -563,7 +562,8 @@ class UniMMV2XTrack(MVXTwoStageDetector):
         
         active_index = (track_instances.obj_idxes>=0) & (track_instances.iou >= self.gt_iou_threshold) & (track_instances.matched_gt_idxes >=0)
         out.update(self.select_active_track_query(track_instances, active_index, img_metas))
-        out.update(self.select_sdc_track_query(track_instances[1500], img_metas))
+        sdc_query_idx = len(track_instances) - 1
+        out.update(self.select_sdc_track_query(track_instances[sdc_query_idx], img_metas))
         
         # memory bank 
         if self.memory_bank is not None:
@@ -822,8 +822,8 @@ class UniMMV2XTrack(MVXTwoStageDetector):
         track_instances.pred_boxes = output_coords[-1, 0]  # [300, box_dim]
         track_instances.output_embedding = query_feats[-1][0]  # [300, feat_dim]
         track_instances.ref_pts = last_ref_pts[0]
-        # hard_code: assume the 901 query is sdc query 
-        track_instances.obj_idxes[1500] = -2  # TODO
+        sdc_query_idx = len(track_instances) - 1
+        track_instances.obj_idxes[sdc_query_idx] = -2
         """ update track base """
         self.track_base.update(track_instances, None)
        
@@ -994,4 +994,3 @@ class UniMMV2XTrack(MVXTwoStageDetector):
             result_dict = None
 
         return [result_dict]
-

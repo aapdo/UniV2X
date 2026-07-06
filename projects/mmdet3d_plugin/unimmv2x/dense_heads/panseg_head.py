@@ -519,11 +519,29 @@ class PansegformerHead(SegDETRHead):
                              img_meta,
                              gt_bboxes_ignore=None):
         num_bboxes = bbox_pred.size(0)
+        img_meta = self._normalize_img_meta_shape(img_meta)
+        pred_instances = None
+        gt_instances = None
+        try:
+            from mmengine.structures import InstanceData
+            pred_instances = InstanceData(scores=cls_score, bboxes=bbox_pred, priors=bbox_pred)
+            gt_instances = InstanceData(
+                labels=gt_labels,
+                bboxes=gt_bboxes,
+                bboxes_3d=gt_bboxes)
+        except ImportError:
+            pass
+        assign_img_meta = dict(img_meta)
+        assign_img_meta['img_shape'] = img_meta['img_shape'][:2]
         pos_ind_mask, neg_ind_mask, assign_result = self.assigner_filter.assign(
             bbox_pred, cls_score, gt_bboxes, gt_labels, img_meta,
             gt_bboxes_ignore)
-        sampling_result = self.sampler.sample(assign_result, bbox_pred,
-                                              gt_bboxes)
+        try:
+            sampling_result = self.sampler.sample(assign_result, bbox_pred,
+                                                  gt_bboxes)
+        except (AttributeError, TypeError):
+            sampling_result = self.sampler.sample(assign_result, pred_instances,
+                                                  gt_instances)
         pos_inds = sampling_result.pos_inds
         neg_inds = sampling_result.neg_inds
         # label targets
@@ -537,6 +555,7 @@ class PansegformerHead(SegDETRHead):
         bbox_targets = torch.zeros_like(bbox_pred)
         bbox_weights = torch.zeros_like(bbox_pred)
         bbox_weights[pos_inds] = 1.0
+        img_meta = self._normalize_img_meta_shape(img_meta)
         img_h, img_w, _ = img_meta['img_shape']
 
         # DETR regress the relative position of boxes (cxcywh) in the image.
@@ -700,6 +719,7 @@ class PansegformerHead(SegDETRHead):
         # construct factors used for rescale bboxes
         factors = []
         for img_meta, bbox_pred in zip(img_metas, bbox_preds):
+            img_meta = self._normalize_img_meta_shape(img_meta)
             img_h, img_w, _ = img_meta['img_shape']
             factor = bbox_pred.new_tensor([img_w, img_h, img_w,
                                            img_h]).unsqueeze(0).repeat(

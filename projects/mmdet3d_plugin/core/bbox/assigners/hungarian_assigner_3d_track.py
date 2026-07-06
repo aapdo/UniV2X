@@ -91,9 +91,29 @@ class HungarianAssigner3DTrack(BaseAssigner):
             return (None, None)
         # 2. compute the weighted costs
         # classification and bboxcost.
-        cls_cost = self.cls_cost(cls_pred, gt_labels)
-        # regression L1 cost
-        reg_cost = self.reg_cost(bbox_pred[:, :8], gt_bboxes[:, :8])
+        pred_instances = None
+        gt_instances = None
+        try:
+            from mmengine.structures import InstanceData
+            pred_instances = InstanceData(
+                scores=cls_pred,
+                bboxes=bbox_pred[:, :8])
+            gt_instances = InstanceData(
+                labels=gt_labels,
+                bboxes=gt_bboxes[:, :8])
+        except ImportError:
+            pass
+
+        try:
+            cls_cost = self.cls_cost(cls_pred, gt_labels)
+        except (AttributeError, TypeError):
+            cls_cost = self.cls_cost(pred_instances, gt_instances)
+
+        try:
+            # regression L1 cost
+            reg_cost = self.reg_cost(bbox_pred[:, :8], gt_bboxes[:, :8])
+        except (AttributeError, TypeError):
+            reg_cost = self.reg_cost(pred_instances, gt_instances)
         # weighted sum of above three costs
         cost = cls_cost + reg_cost
 

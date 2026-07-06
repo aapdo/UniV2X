@@ -453,17 +453,15 @@ def create_spd_infos_coop(root_path,
             val_spd_infos.append(info)
         spd_infos.append(info)
 
-        if flag_save:
-            metadata = dict(version=version)
-            data = dict(infos=train_spd_infos, metadata=metadata)
-            info_path = osp.join(out_path,
-                                '{}_infos_temporal_train.pkl'.format(info_prefix))
-            mmcv.dump(data, info_path)
+    if flag_save:
+        metadata = dict(version=version)
+        info_path = osp.join(out_path,
+                            '{}_infos_temporal_train.pkl'.format(info_prefix))
+        mmcv.dump(dict(infos=train_spd_infos, metadata=metadata), info_path)
 
-            data['infos'] = val_spd_infos
-            info_val_path = osp.join(out_path,
-                                    '{}_infos_temporal_val.pkl'.format(info_prefix))
-            mmcv.dump(data, info_val_path)
+        info_val_path = osp.join(out_path,
+                                '{}_infos_temporal_val.pkl'.format(info_prefix))
+        mmcv.dump(dict(infos=val_spd_infos, metadata=metadata), info_val_path)
 
     return total_annotations, sample_info_mappings, spd_infos
 
@@ -557,7 +555,14 @@ def create_spd_infos(root_path,
     spd_infos = []
 
     ## Generate  sample_info_mappings, secene_frame_mappings, total_annotations, instance_token_mappings
-    sample_infos, sample_info_mappings = _generate_sample_infos(data_infos)
+    sequence_locations = _build_sequence_location_mapping(data_infos)
+    if v2x_side == 'vehicle-side':
+        for sequence_id, location in _load_infrastructure_sequence_locations(root_path).items():
+            _merge_sequence_location(sequence_locations, sequence_id, location)
+    sample_infos, sample_info_mappings = _generate_sample_infos(
+        data_infos,
+        sequence_locations=sequence_locations,
+        source_name=v2x_side)
     secene_frame_mappings = _get_secene_frame_mappings(sample_info_mappings)
     total_annotations = _get_total_annotations(root_path, data_infos, sample_info_mappings)
     instance_token_mappings = _get_instance_token_mappings(total_annotations, sample_info_mappings)
@@ -767,18 +772,15 @@ def create_spd_infos(root_path,
             val_spd_infos.append(info)
         spd_infos.append(info)
 
-        if flag_save:
-            metadata = dict(version=version)
-            data = dict(infos=train_spd_infos, metadata=metadata)
-            info_path = osp.join(out_path,
-                                    '{}_infos_temporal_train.pkl'.format(info_prefix))
-            mmcv.dump(data, info_path)
+    if flag_save:
+        metadata = dict(version=version)
+        info_path = osp.join(out_path,
+                                '{}_infos_temporal_train.pkl'.format(info_prefix))
+        mmcv.dump(dict(infos=train_spd_infos, metadata=metadata), info_path)
 
-            data['infos'] = val_spd_infos
-            info_val_path = osp.join(out_path,
-                                        '{}_infos_temporal_val.pkl'.format(info_prefix))
-            mmcv.dump(data, info_val_path)
-
+        info_val_path = osp.join(out_path,
+                                    '{}_infos_temporal_val.pkl'.format(info_prefix))
+        mmcv.dump(dict(infos=val_spd_infos, metadata=metadata), info_val_path)
 
     return total_annotations, sample_info_mappings, spd_infos
 
@@ -801,6 +803,43 @@ def load_json(path):
 def write_json(data, path):
     with open(path, mode="w") as f:
         json.dump(data, f, indent=2)
+
+def _merge_sequence_location(mapping, sequence_id, location):
+    if not sequence_id or not location:
+        return
+    if sequence_id in mapping and mapping[sequence_id] != location:
+        raise ValueError(
+            'Ambiguous intersection_loc for sequence {}: {} vs {}'.format(
+                sequence_id, mapping[sequence_id], location))
+    mapping[sequence_id] = location
+
+def _build_sequence_location_mapping(*data_infos_list):
+    sequence_locations = {}
+    for data_infos in data_infos_list:
+        for data_info in data_infos:
+            _merge_sequence_location(
+                sequence_locations,
+                data_info.get('sequence_id'),
+                data_info.get('intersection_loc', ''))
+    return sequence_locations
+
+def _load_infrastructure_sequence_locations(root_path):
+    inf_data_info_path = osp.join(root_path, 'infrastructure-side/data_info.json')
+    if not osp.exists(inf_data_info_path):
+        return {}
+    return _build_sequence_location_mapping(load_json(inf_data_info_path))
+
+def _resolve_intersection_loc(sample_info, sequence_locations, source_name):
+    location = sample_info.get('intersection_loc', '')
+    if location:
+        return location
+    sequence_id = sample_info.get('sequence_id', '')
+    location = sequence_locations.get(sequence_id, '')
+    if location:
+        return location
+    raise ValueError(
+        'Missing intersection_loc for {} frame {} sequence {}'.format(
+            source_name, sample_info.get('frame_id', ''), sequence_id))
         
 def geom2anno(map_geoms):
     MAP_CLASSES = (
@@ -894,7 +933,12 @@ def _generate_sample_infos_coop(coop_data_infos,veh_data_infos,inf_data_infos):
             info['timestamp'] = float(veh_sample_info['pointcloud_timestamp'])
             info['image_timestamp'] = float(veh_sample_info['image_timestamp'])
             info['scene_token'] = veh_sample_info['sequence_id']
-            info['location'] = veh_sample_info['intersection_loc']
+            info['location'] = veh_sample_info.get(
+                'intersection_loc', '') or inf_sample_info.get('intersection_loc', '')
+            if not info['location']:
+                raise ValueError(
+                    'Missing intersection_loc for cooperative vehicle frame {} '
+                    'and infrastructure frame {}'.format(veh_frame_id, inf_frame_id))
             info['frame_idx'] = idx
 
             info['token_inf'] = inf_sample_info['frame_id']
@@ -912,7 +956,7 @@ def _generate_sample_infos_coop(coop_data_infos,veh_data_infos,inf_data_infos):
     
     return sample_infos, sample_info_mappings
 
-def _generate_sample_infos(data_infos):
+def _generate_sample_infos(data_infos, sequence_locations=None, source_name=''):
     """Get the prev and next sample token for a given `sample_data_token`.
     Args:
         data_infos (list): data_infos loaded from data_info.json file.
@@ -932,6 +976,7 @@ def _generate_sample_infos(data_infos):
 
         scene_data_dict[scene_token].append(sample_token)
 
+    sequence_locations = sequence_locations or _build_sequence_location_mapping(data_infos)
     sample_infos = []
     for scene_token in scene_data_dict.keys():
         scene_data_dict[scene_token].sort()
@@ -954,7 +999,8 @@ def _generate_sample_infos(data_infos):
             info['timestamp'] = float(sample_info['pointcloud_timestamp'])
             info['image_timestamp'] = float(sample_info['image_timestamp'])
             info['scene_token'] = sample_info['sequence_id']
-            info['location'] = sample_info['intersection_loc']
+            info['location'] = _resolve_intersection_loc(
+                sample_info, sequence_locations, source_name)
             info['frame_idx'] = idx
 
             sample_infos.append(info)
@@ -1018,6 +1064,10 @@ def _generate_unvisible_annotations(source_name, sample_info_mappings, secene_fr
         assert cur_scene_token == cur_scene_token_end
 
         for ii in range(len(cur_instance_samples) - 1):
+            if cur_instance_samples[ii + 1]['frame_idx'] <= cur_instance_samples[ii]['frame_idx']:
+                continue
+            if cur_instance_samples[ii + 1]['timestamp'] == cur_instance_samples[ii]['timestamp']:
+                continue
             cur_frame_idx = cur_instance_samples[ii]['frame_idx'] + 1
             while cur_frame_idx != cur_instance_samples[ii + 1]['frame_idx']:
                 # linear interpolation
@@ -1214,8 +1264,11 @@ def _add_annotation_velocity_prev_next(total_annotations, instance_token_mapping
                 # for key in loc_ii_0.keys():
                 #     gt_velocity_dict[key] = (loc_ii_1[key] - loc_ii_0[key]) / (timestamp_ii_1 - timestamp_ii_0)
                 # gt_velocity = [gt_velocity_dict['x'], gt_velocity_dict['y']]
-                gt_velocity = (center_1 - center_0) / time_delta
-                gt_velocity = gt_velocity[:2]
+                if time_delta <= 0:
+                    gt_velocity = [0, 0]
+                else:
+                    gt_velocity = (center_1 - center_0) / time_delta
+                    gt_velocity = gt_velocity[:2]
 
             instance_token_mappings[instance_token][ii]['annotation']['gt_velocity'] = gt_velocity
             instance_token_mappings[instance_token][ii]['annotation']['prev'] = prev_anno_token
@@ -1256,7 +1309,13 @@ def _get_instance_token_mappings(total_annotations, sample_info_mappings):
 
     # sorted by frame_idx, for downstream usage
     for instance_token in instance_token_mappings.keys():
-        sorted(instance_token_mappings[instance_token], key=lambda annotation: annotation['frame_idx'])
+        instance_token_mappings[instance_token] = sorted(
+            instance_token_mappings[instance_token],
+            key=lambda annotation: (
+                annotation['scene_token'],
+                annotation['frame_idx'],
+                annotation['sample_token'],
+                annotation['annotation']['token']))
 
     return instance_token_mappings
 
@@ -1331,4 +1390,3 @@ if __name__ == "__main__":
                                                                             info_prefix,
                                                                             version=args.version,
                                                                             max_sweeps=10)
-

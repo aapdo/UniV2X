@@ -247,20 +247,50 @@ class HungarianAssigner_filter(BaseAssigner):
                 # No ground truth, assign all to background
             return pos_ind, neg_ind,  AssignResult(
                 num_gts, assigned_gt_inds, None, labels=assigned_labels)
-        img_h, img_w, _ = img_meta['img_shape']
+        img_meta = dict(img_meta)
+        img_shape = img_meta.get('img_shape')
+        while (isinstance(img_shape, (list, tuple)) and len(img_shape) == 1
+               and isinstance(img_shape[0], (list, tuple))):
+            img_shape = img_shape[0]
+        if img_shape is None or len(img_shape) < 2:
+            img_shape = img_meta.get('batch_input_shape', (1, 1, 1))
+        if len(img_shape) == 2:
+            img_shape = tuple(img_shape) + (1,)
+        img_h, img_w, _ = tuple(img_shape[:3])
         factor = gt_bboxes.new_tensor([img_w, img_h, img_w,
                                        img_h]).unsqueeze(0)
 
         # 2. compute the weighted costs
         # classification and bboxcost.
-        
-        cls_cost = self.cls_cost(cls_pred, gt_labels)
+
+        pred_instances = None
+        gt_instances = None
+        assign_img_meta = {'img_shape': (img_h, img_w)}
+        try:
+            from mmengine.structures import InstanceData
+            pred_bboxes_xyxy = bbox_cxcywh_to_xyxy(bbox_pred) * factor
+            pred_instances = InstanceData(
+                scores=cls_pred,
+                bboxes=pred_bboxes_xyxy)
+            gt_instances = InstanceData(labels=gt_labels, bboxes=gt_bboxes)
+        except ImportError:
+            pass
+        try:
+            cls_cost = self.cls_cost(cls_pred, gt_labels)
+        except (AttributeError, TypeError):
+            cls_cost = self.cls_cost(pred_instances, gt_instances)
         # regression L1 cost
         normalize_gt_bboxes = gt_bboxes / factor
-        reg_cost = self.reg_cost(bbox_pred, normalize_gt_bboxes)
+        try:
+            reg_cost = self.reg_cost(bbox_pred, normalize_gt_bboxes)
+        except (AttributeError, TypeError):
+            reg_cost = self.reg_cost(pred_instances, gt_instances, assign_img_meta)
         # regression iou cost, defaultly giou is used in official DETR.
         bboxes = bbox_cxcywh_to_xyxy(bbox_pred) * factor
-        iou_cost = self.iou_cost(bboxes, gt_bboxes)
+        try:
+            iou_cost = self.iou_cost(bboxes, gt_bboxes)
+        except (AttributeError, TypeError):
+            iou_cost = self.iou_cost(pred_instances, gt_instances)
         # weighted sum of above three cost
         
         cost = cls_cost + reg_cost + iou_cost 
@@ -278,20 +308,20 @@ class HungarianAssigner_filter(BaseAssigner):
         for i in range(min(self.max_pos, 300//num_gts)):
             matched_row_inds, matched_col_inds = linear_sum_assignment(cost)
             
-            matched_row_inds = torch.from_numpy(matched_row_inds).to(
-                bbox_pred.device)
-            matched_col_inds = torch.from_numpy(matched_col_inds).to(
-                bbox_pred.device)     
+            matched_row_inds_cpu = torch.from_numpy(matched_row_inds).long()
+            matched_col_inds_cpu = torch.from_numpy(matched_col_inds).long()
+            matched_row_inds = matched_row_inds_cpu.to(bbox_pred.device)
+            matched_col_inds = matched_col_inds_cpu.to(bbox_pred.device)
             #print(matched_row_inds)
-                
-            cost[matched_row_inds,:] = INF   
+
+            cost[matched_row_inds_cpu, :] = INF
             #index_set.(matched_row_inds)
             #print('this mathed row inds ', len(matched_row_inds), i)
             assigned_gt_inds[matched_row_inds] = matched_col_inds + 1
             assigned_labels[matched_row_inds] = gt_labels[matched_col_inds]
             if i == 0:
                 result = AssignResult(num_gts, assigned_gt_inds.clone(), None, labels=assigned_labels.clone())
-            if cost[matched_row_inds,matched_col_inds].max()>=INF:
+            if cost[matched_row_inds_cpu, matched_col_inds_cpu].max() >= INF:
                 break
         pos_ind = assigned_gt_inds.gt(0).nonzero().squeeze(1)
         neg_ind = assigned_gt_inds.eq(0).nonzero().squeeze(1)
@@ -407,19 +437,49 @@ class HungarianAssigner_multi_info(BaseAssigner):
                 assigned_gt_inds[:] = 0
             return AssignResult(
                 num_gts, assigned_gt_inds, None, labels=assigned_labels)
-        img_h, img_w, _ = img_meta['img_shape']
-        
+        img_meta = dict(img_meta)
+        img_shape = img_meta.get('img_shape')
+        while (isinstance(img_shape, (list, tuple)) and len(img_shape) == 1
+               and isinstance(img_shape[0], (list, tuple))):
+            img_shape = img_shape[0]
+        if img_shape is None or len(img_shape) < 2:
+            img_shape = img_meta.get('batch_input_shape', (1, 1, 1))
+        if len(img_shape) == 2:
+            img_shape = tuple(img_shape) + (1,)
+        img_h, img_w, _ = tuple(img_shape[:3])
+
         factor = bbox_pred.new_tensor([img_w, img_h, img_w,img_h]).unsqueeze(0)
 
-      
+
         # classification and bboxcost.
-        cls_cost = self.cls_cost(cls_pred, gt_labels)
+        pred_instances = None
+        gt_instances = None
+        assign_img_meta = {'img_shape': (img_h, img_w)}
+        try:
+            from mmengine.structures import InstanceData
+            pred_bboxes_xyxy = bbox_cxcywh_to_xyxy(bbox_pred) * factor
+            pred_instances = InstanceData(
+                scores=cls_pred,
+                bboxes=pred_bboxes_xyxy)
+            gt_instances = InstanceData(labels=gt_labels, bboxes=gt_bboxes)
+        except ImportError:
+            pass
+        try:
+            cls_cost = self.cls_cost(cls_pred, gt_labels)
+        except (AttributeError, TypeError):
+            cls_cost = self.cls_cost(pred_instances, gt_instances)
         # regression L1 cost
         normalize_gt_bboxes = gt_bboxes / factor
-        reg_cost = self.reg_cost(bbox_pred, normalize_gt_bboxes)
+        try:
+            reg_cost = self.reg_cost(bbox_pred, normalize_gt_bboxes)
+        except (AttributeError, TypeError):
+            reg_cost = self.reg_cost(pred_instances, gt_instances, assign_img_meta)
         # regression iou cost, defaultly giou is used in official DETR.
         bboxes = bbox_cxcywh_to_xyxy(bbox_pred) * factor
-        iou_cost = self.iou_cost(bboxes, gt_bboxes)
+        try:
+            iou_cost = self.iou_cost(bboxes, gt_bboxes)
+        except (AttributeError, TypeError):
+            iou_cost = self.iou_cost(pred_instances, gt_instances)
         # weighted sum of above three costs
         mask_cost = self.mask_cost(mask_pred,gt_mask)
         #

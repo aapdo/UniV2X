@@ -1,0 +1,27 @@
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Root-level experiment outputs and large artifacts
+/ckpts/
+/data/
+/datasets/
+/logs/
+/wandb/
+/projects/work_dirs*/
+/work_dirs*/
+/outputs/
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# Local scratch
+*.bak_*
+*.tmp
+.DS_Store

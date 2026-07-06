@@ -51,6 +51,20 @@ class SegDETRHead(
 
     _version = 2
 
+    @staticmethod
+    def _normalize_img_meta_shape(img_meta):
+        img_meta = dict(img_meta)
+        img_shape = img_meta.get('img_shape')
+        while (isinstance(img_shape, (list, tuple)) and len(img_shape) == 1
+               and isinstance(img_shape[0], (list, tuple))):
+            img_shape = img_shape[0]
+        if img_shape is None or len(img_shape) < 2:
+            img_shape = img_meta.get('batch_input_shape', (1, 1, 1))
+        if len(img_shape) == 2:
+            img_shape = tuple(img_shape) + (1,)
+        img_meta['img_shape'] = tuple(img_shape[:3])
+        return img_meta
+
     def __init__(
             self,
             num_classes,
@@ -248,7 +262,8 @@ class SegDETRHead(
         input_img_h, input_img_w = img_metas[0]['batch_input_shape']
         masks = x.new_ones((batch_size, input_img_h, input_img_w))
         for img_id in range(batch_size):
-            img_h, img_w, _ = img_metas[img_id]['img_shape']
+            img_meta = self._normalize_img_meta_shape(img_metas[img_id])
+            img_h, img_w, _ = img_meta['img_shape']
             masks[img_id, :img_h, :img_w] = 0
 
         x = self.input_proj(x)
@@ -265,6 +280,9 @@ class SegDETRHead(
         all_bbox_preds = self.fc_reg(self.activate(
             self.reg_ffn(outs_dec))).sigmoid()
         return all_cls_scores, all_bbox_preds
+
+    def loss_by_feat(self, *args, **kwargs):
+        return self.loss(*args, **kwargs)
 
     @force_fp32(apply_to=('all_cls_scores_list', 'all_bbox_preds_list'))
     def loss(self,
@@ -396,6 +414,7 @@ class SegDETRHead(
         # construct factors used for rescale bboxes
         factors = []
         for img_meta, bbox_pred in zip(img_metas, bbox_preds):
+            img_meta = self._normalize_img_meta_shape(img_meta)
             img_h, img_w, _ = img_meta['img_shape']
             factor = bbox_pred.new_tensor([img_w, img_h, img_w,
                                            img_h]).unsqueeze(0).repeat(
@@ -516,14 +535,51 @@ class SegDETRHead(
                 - neg_inds (Tensor): Sampled negative indices for each image.
         """
         num_bboxes = bbox_pred.size(0)
+        img_meta = dict(img_meta)
+        img_shape = img_meta.get('img_shape')
+        while (isinstance(img_shape, (list, tuple)) and len(img_shape) == 1
+               and isinstance(img_shape[0], (list, tuple))):
+            img_shape = img_shape[0]
+        if img_shape is None or len(img_shape) < 2:
+            img_shape = img_meta.get('batch_input_shape', (1, 1, 1))
+        if len(img_shape) == 2:
+            img_shape = tuple(img_shape) + (1,)
+        img_meta['img_shape'] = tuple(img_shape[:3])
         # assigner and sampler
         # import ipdb
         # ipdb.set_trace()
-        assign_result = self.assigner.assign(bbox_pred, cls_score, gt_bboxes,
-                                            gt_labels, img_meta,
-                                            gt_bboxes_ignore)
-        sampling_result = self.sampler.sample(assign_result, bbox_pred,
-                                              gt_bboxes)
+        pred_instances = None
+        gt_instances = None
+        try:
+            from mmengine.structures import InstanceData
+            pred_instances = InstanceData(
+                scores=cls_score,
+                bboxes=bbox_pred,
+                priors=bbox_pred)
+            gt_instances = InstanceData(
+                bboxes=gt_bboxes,
+                bboxes_3d=gt_bboxes,
+                labels=gt_labels)
+        except ImportError:
+            pass
+
+        assign_img_meta = dict(img_meta)
+        assign_img_meta['img_shape'] = img_meta['img_shape'][:2]
+
+        try:
+            assign_result = self.assigner.assign(
+                bbox_pred, cls_score, gt_bboxes, gt_labels, img_meta,
+                gt_bboxes_ignore)
+        except TypeError:
+            assign_result = self.assigner.assign(
+                pred_instances, gt_instances, assign_img_meta)
+
+        try:
+            sampling_result = self.sampler.sample(assign_result, bbox_pred,
+                                                  gt_bboxes)
+        except (AttributeError, TypeError):
+            sampling_result = self.sampler.sample(assign_result, pred_instances,
+                                                  gt_instances)
         pos_inds = sampling_result.pos_inds
         neg_inds = sampling_result.neg_inds
 
@@ -538,6 +594,7 @@ class SegDETRHead(
         bbox_targets = torch.zeros_like(bbox_pred)
         bbox_weights = torch.zeros_like(bbox_pred)
         bbox_weights[pos_inds] = 1.0
+        img_meta = self._normalize_img_meta_shape(img_meta)
         img_h, img_w, _ = img_meta['img_shape']
 
         # DETR regress the relative position of boxes (cxcywh) in the image.

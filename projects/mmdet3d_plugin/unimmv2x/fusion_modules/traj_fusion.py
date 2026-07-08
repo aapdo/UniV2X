@@ -9,13 +9,21 @@ from projects.mmdet3d_plugin.models.utils.functional import (
     anchor_coordinate_transform
 )
 class TrajFusion(nn.Module):
-    def __init__(self, embed_dims=256, anchor_info_path=''):
+    def __init__(self, embed_dims=256, anchor_info_path='', num_anchor=6,
+                 num_anchor_group=None, predict_steps=12, cls2group=None):
         super(TrajFusion, self).__init__()
         self.embed_dims = embed_dims
+        self.num_anchor = num_anchor
+        self.predict_steps = predict_steps
+        if cls2group is None:
+            self.register_buffer('cls2group', torch.empty(0, dtype=torch.long), persistent=False)
+        else:
+            self.register_buffer('cls2group', cls2group.clone().detach().long(), persistent=False)
         
         anchor_infos = pickle.load(open(anchor_info_path, 'rb'))
         self.kmeans_anchors = torch.stack(
             [torch.from_numpy(a) for a in anchor_infos["anchors_all"]])  # Nc, Pc, steps, 2
+        self.num_anchor_group = num_anchor_group or self.kmeans_anchors.shape[0]
 
         self.scene_level_offset_embedding_layer = nn.Sequential(
             nn.Linear(self.embed_dims, self.embed_dims*2),

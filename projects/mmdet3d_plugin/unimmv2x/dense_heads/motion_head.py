@@ -83,7 +83,14 @@ class MotionHead(BaseMotionHead):
         self._build_layers(transformerlayers, det_layer_num)
         self._init_layers()
         self.is_fusion = is_fusion
-        self.traj_fusion = TrajFusion(self.embed_dims, anchor_info_path)
+        self.traj_fusion = TrajFusion(
+            self.embed_dims,
+            anchor_info_path,
+            num_anchor=self.num_anchor,
+            num_anchor_group=self.num_anchor_group,
+            predict_steps=self.predict_steps,
+            cls2group=self.cls2group,
+        )
 
     def forward_train(self,
                       bev_embed,

@@ -41,6 +41,13 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-validate", action="store_true")
     parser.add_argument("--ignore-missing-load-from", action="store_true")
+    parser.add_argument("--resume-from", default=os.environ.get("RESUME_FROM"))
+    parser.add_argument(
+        "--auto-resume",
+        action="store_true",
+        default=os.environ.get("AUTO_RESUME", "0") == "1",
+        help="Resume from latest.pth in the work_dir when it exists.",
+    )
     parser.add_argument("--base-global-batch", type=int, default=8)
     parser.add_argument("--no-scale-lr", action="store_true")
     parser.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT"))
@@ -332,6 +339,66 @@ def make_checkpoint(model, optimizer, cfg, epoch, best_loss=None):
     return checkpoint
 
 
+def save_checkpoint_atomic(checkpoint, path):
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    if osp.exists(tmp_path):
+        os.remove(tmp_path)
+    try:
+        torch.save(checkpoint, tmp_path)
+        os.replace(tmp_path, path)
+    finally:
+        if osp.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def replace_checkpoint_alias(src, dst):
+    tmp_path = f"{dst}.tmp.{os.getpid()}"
+    if osp.exists(tmp_path):
+        os.remove(tmp_path)
+    try:
+        try:
+            os.link(src, tmp_path)
+        except OSError:
+            shutil.copy2(src, tmp_path)
+        os.replace(tmp_path, dst)
+    finally:
+        if osp.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def resolve_resume_path(args, cfg):
+    if args.resume_from:
+        return args.resume_from
+    if args.auto_resume:
+        latest_path = osp.join(cfg.work_dir, "latest.pth")
+        if osp.isfile(latest_path):
+            return latest_path
+    return None
+
+
+def move_optimizer_state_to_cuda(optimizer):
+    device = torch.device("cuda", torch.cuda.current_device())
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if isinstance(value, torch.Tensor):
+                state[key] = value.to(device=device, non_blocking=True)
+
+
+def load_training_state(model, optimizer, resume_from):
+    checkpoint = torch.load(resume_from, map_location="cpu")
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    model_to_load = model.module if hasattr(model, "module") else model
+    model_to_load.load_state_dict(state_dict, strict=True)
+    if "optimizer" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        move_optimizer_state_to_cuda(optimizer)
+    epoch = int(checkpoint.get("epoch", 0) or 0)
+    best_loss = checkpoint.get("best_loss", None)
+    if isinstance(best_loss, torch.Tensor):
+        best_loss = float(best_loss.detach().cpu())
+    return epoch, best_loss
+
+
 def prune_epoch_checkpoints(work_dir, current_epoch, keep_epochs):
     keep_epochs = int(keep_epochs)
     current_epoch = int(current_epoch)
@@ -428,9 +495,22 @@ def main():
     grad_clip_cfg = cfg.optimizer_config.get("grad_clip", None)
     global_step = 0
     best_loss = None
+    start_epoch = 0
+    resume_from = resolve_resume_path(args, cfg)
+    if resume_from:
+        if not osp.isfile(resume_from):
+            raise FileNotFoundError(f"Missing resume checkpoint: {resume_from}")
+        start_epoch, best_loss = load_training_state(model, optimizer, resume_from)
+        global_step = start_epoch * max(1, len(data_loader))
+        if is_main_process(rank):
+            print(
+                f"[h200_train] resumed from {resume_from}; "
+                f"start_epoch={start_epoch} global_step={global_step}",
+                flush=True,
+            )
     optimizer.zero_grad(set_to_none=True)
 
-    for epoch in range(max_epochs):
+    for epoch in range(start_epoch, max_epochs):
         if hasattr(data_loader.sampler, "set_epoch"):
             data_loader.sampler.set_epoch(epoch)
         epoch_loss_sum = 0.0
@@ -491,18 +571,18 @@ def main():
             if is_best:
                 best_loss = epoch_loss
 
-            torch.save(
+            save_checkpoint_atomic(
                 make_checkpoint(model, optimizer, cfg, current_epoch, best_loss),
                 checkpoint_path,
             )
-            shutil.copy2(checkpoint_path, latest_path)
+            replace_checkpoint_alias(checkpoint_path, latest_path)
             print(
                 f"[h200_train] saved {checkpoint_path}; latest={latest_path}",
                 flush=True,
             )
 
             if is_best:
-                shutil.copy2(checkpoint_path, best_path)
+                replace_checkpoint_alias(checkpoint_path, best_path)
                 print(
                     f"[h200_train] updated best={best_path} "
                     f"epoch={current_epoch} train_loss={epoch_loss:.6f}",

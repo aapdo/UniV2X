@@ -209,6 +209,12 @@ try:
 except Exception:
     pass
 else:
+    # Import the package for its OpenMMLab-2.x transform registrations.
+    try:
+        import mmdet3d.datasets.transforms  # noqa: F401
+    except Exception:
+        pass
+
     models_builder = types.ModuleType('mmdet.models.builder')
     models_builder.BACKBONES = MMDET3D_MODELS
     models_builder.HEADS = MMDET3D_MODELS

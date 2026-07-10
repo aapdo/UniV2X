@@ -21,7 +21,11 @@ from mmdet3d.models import build_model
 from mmdet.apis import set_random_seed
 from projects.mmdet3d_plugin.unimmv2x.apis.test import custom_multi_gpu_test
 from projects.mmdet3d_plugin.unimmv2x.detectors.multi_agent import MultiAgent
-from mmdet.datasets import replace_ImageToTensor
+try:
+    from mmdet.datasets import replace_ImageToTensor
+except ImportError:
+    def replace_ImageToTensor(pipeline):
+        return pipeline
 import time
 import os.path as osp
 

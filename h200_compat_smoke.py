@@ -212,6 +212,9 @@ else:
     # Import the package for its OpenMMLab-2.x transform registrations.
     try:
         import mmdet3d.datasets.transforms  # noqa: F401
+        from mmdet3d.datasets.transforms import MultiScaleFlipAug3D
+        MMENGINE_TRANSFORMS.register_module(
+            name='MultiScaleFlipAug3D', module=MultiScaleFlipAug3D, force=True)
     except Exception:
         pass
 

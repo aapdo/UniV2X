@@ -17,7 +17,7 @@ from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
 
 from projects.mmdet3d_plugin.datasets import custom_build_dataset
 from projects.mmdet3d_plugin.datasets.builder import build_dataloader
-from mmdet3d.models import build_model
+from mmdet3d.registry import MODELS
 from mmdet.apis import set_random_seed
 from projects.mmdet3d_plugin.unimmv2x.apis.test import custom_multi_gpu_test
 from projects.mmdet3d_plugin.unimmv2x.detectors.multi_agent import MultiAgent
@@ -216,7 +216,7 @@ def main():
     for other_agent_name in other_agent_names:
         # build the model and load checkpoint
         cfg.get(other_agent_name).train_cfg = None
-        model_other_agent = build_model(cfg.get(other_agent_name), test_cfg=cfg.get('test_cfg'))
+        model_other_agent = MODELS.build(cfg.get(other_agent_name))
         load_from = cfg.get(other_agent_name).load_from
         if load_from:
             checkpoint = load_checkpoint(model_other_agent, load_from, map_location='cpu', revise_keys=[(r'^model_ego_agent\.', '')])
@@ -225,7 +225,7 @@ def main():
 
     # build the ego_vehicle model and load checkpoint
     cfg.model_ego_agent.train_cfg = None
-    model_ego_agent = build_model(cfg.model_ego_agent, test_cfg=cfg.get('test_cfg'))
+    model_ego_agent = MODELS.build(cfg.model_ego_agent)
     load_from = cfg.model_ego_agent.load_from
     if load_from:
         checkpoint = load_checkpoint(model_ego_agent, load_from, map_location='cpu', revise_keys=[(r'^model_ego_agent\.', '')])

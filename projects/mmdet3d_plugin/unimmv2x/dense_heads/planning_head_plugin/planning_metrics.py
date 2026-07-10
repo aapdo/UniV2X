@@ -40,6 +40,7 @@ class PlanningMetric(Metric):
         self.add_state("obj_out", default=torch.zeros(self.n_future), dist_reduce_fx="sum")
         self.add_state("obj_box_out", default=torch.zeros(self.n_future), dist_reduce_fx="sum")
         self.add_state("L2", default=torch.zeros(self.n_future),dist_reduce_fx="sum")
+        self.add_state("valid_total", default=torch.zeros(self.n_future), dist_reduce_fx="sum")
         self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def evaluate_single_coll(self, traj, segmentation):
@@ -154,13 +155,17 @@ class PlanningMetric(Metric):
         self.obj_out += obj_out_sum
         self.obj_box_out += obj_box_out_sum
         self.L2 += L2.sum(dim=0)
+        self.valid_total += gt_trajs_mask[..., :2].bool().all(dim=-1).sum(dim=0)
         self.total +=len(trajs)
 
     def compute(self):
+        valid_total = self.valid_total.clamp_min(1)
         return {
             'obj_col': self.obj_col / self.total,
             'obj_box_col': self.obj_box_col / self.total,
             'obj_out': self.obj_out / self.total,
             'obj_box_out': self.obj_box_out / self.total,
-            'L2' : self.L2 / self.total
+            'L2': self.L2 / self.total,
+            'L2_valid': self.L2 / valid_total,
+            'L2_valid_count': self.valid_total,
         }

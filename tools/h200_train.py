@@ -219,6 +219,16 @@ def get_base_lrs(optimizer):
     return [group["lr"] for group in optimizer.param_groups]
 
 
+def optimizer_steps_per_epoch(num_batches, accum):
+    return math.ceil(max(0, int(num_batches)) / max(1, int(accum)))
+
+
+def accumulation_group_size(iter_idx, num_batches, accum):
+    accum = max(1, int(accum))
+    group_start = (int(iter_idx) // accum) * accum
+    return min(accum, int(num_batches) - group_start)
+
+
 def init_wandb(args, cfg, rank, world_size):
     if not is_main_process(rank) or not args.wandb_project:
         return None
@@ -271,7 +281,7 @@ def upload_to_hf(args, work_dir):
     )
 
 
-def update_lr(optimizer, base_lrs, cfg, global_step, total_steps):
+def update_lr(optimizer, base_lrs, cfg, optimizer_step, total_optimizer_steps):
     lr_cfg = cfg.get("lr_config", {})
     policy = lr_cfg.get("policy", None)
     warmup_iters = int(lr_cfg.get("warmup_iters", 0) or 0)
@@ -279,10 +289,12 @@ def update_lr(optimizer, base_lrs, cfg, global_step, total_steps):
     min_lr_ratio = float(lr_cfg.get("min_lr_ratio", 0.0))
 
     if policy == "CosineAnnealing":
-        if total_steps <= warmup_iters:
+        if total_optimizer_steps <= warmup_iters:
             progress = 1.0
         else:
-            progress = (global_step - warmup_iters) / max(1, total_steps - warmup_iters)
+            progress = (optimizer_step - warmup_iters) / max(
+                1, total_optimizer_steps - warmup_iters
+            )
             progress = min(max(progress, 0.0), 1.0)
         factor = min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (
             1.0 + math.cos(math.pi * progress)
@@ -290,8 +302,8 @@ def update_lr(optimizer, base_lrs, cfg, global_step, total_steps):
     else:
         factor = 1.0
 
-    if warmup_iters > 0 and global_step < warmup_iters:
-        warmup_progress = global_step / max(1, warmup_iters)
+    if warmup_iters > 0 and optimizer_step < warmup_iters:
+        warmup_progress = optimizer_step / max(1, warmup_iters)
         warmup_factor = warmup_ratio + warmup_progress * (1.0 - warmup_ratio)
         factor *= warmup_factor
 
@@ -491,9 +503,11 @@ def main():
     max_epochs = int(cfg.runner.max_epochs if "runner" in cfg else cfg.total_epochs)
     if args.max_epochs is not None:
         max_epochs = args.max_epochs
-    total_steps = max_epochs * max(1, len(data_loader))
+    optimizer_steps_in_epoch = optimizer_steps_per_epoch(len(data_loader), accum)
+    total_optimizer_steps = max_epochs * optimizer_steps_in_epoch
     grad_clip_cfg = cfg.optimizer_config.get("grad_clip", None)
     global_step = 0
+    optimizer_step = 0
     best_loss = None
     start_epoch = 0
     resume_from = resolve_resume_path(args, cfg)
@@ -502,10 +516,12 @@ def main():
             raise FileNotFoundError(f"Missing resume checkpoint: {resume_from}")
         start_epoch, best_loss = load_training_state(model, optimizer, resume_from)
         global_step = start_epoch * max(1, len(data_loader))
+        optimizer_step = start_epoch * optimizer_steps_in_epoch
         if is_main_process(rank):
             print(
                 f"[h200_train] resumed from {resume_from}; "
-                f"start_epoch={start_epoch} global_step={global_step}",
+                f"start_epoch={start_epoch} global_step={global_step} "
+                f"optimizer_step={optimizer_step}",
                 flush=True,
             )
     optimizer.zero_grad(set_to_none=True)
@@ -515,18 +531,36 @@ def main():
             data_loader.sampler.set_epoch(epoch)
         epoch_loss_sum = 0.0
         epoch_loss_count = 0
+        num_batches_this_epoch = len(data_loader)
+        if args.max_iters is not None:
+            num_batches_this_epoch = min(
+                num_batches_this_epoch, max(0, args.max_iters - global_step)
+            )
 
         for iter_idx, data in enumerate(data_loader):
-            update_lr(optimizer, base_lrs, cfg, global_step, total_steps)
+            if iter_idx >= num_batches_this_epoch:
+                break
+            update_lr(
+                optimizer,
+                base_lrs,
+                cfg,
+                optimizer_step,
+                total_optimizer_steps,
+            )
             data = move_data_to_cuda(data)
             losses = model(return_loss=True, **data)
             loss, log_vars = parse_losses(losses)
             loss_value = float(log_vars["loss"].detach().cpu())
             epoch_loss_sum += loss_value
             epoch_loss_count += 1
-            (loss / accum).backward()
+            group_size = accumulation_group_size(
+                iter_idx, num_batches_this_epoch, accum
+            )
+            (loss / group_size).backward()
 
-            should_step = (global_step + 1) % accum == 0
+            should_step = (iter_idx + 1) % accum == 0 or (
+                iter_idx + 1 == num_batches_this_epoch
+            )
             if should_step:
                 if grad_clip_cfg is not None:
                     torch.nn.utils.clip_grad_norm_(
@@ -536,6 +570,7 @@ def main():
                     )
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+                optimizer_step += 1
 
             if is_main_process(rank) and global_step % int(cfg.log_config.interval) == 0:
                 lr = optimizer.param_groups[0]["lr"]
@@ -552,6 +587,7 @@ def main():
                             "train/lr": lr,
                             "train/epoch": epoch + 1,
                             "train/global_step": global_step,
+                            "train/optimizer_step": optimizer_step,
                         },
                         step=global_step,
                     )

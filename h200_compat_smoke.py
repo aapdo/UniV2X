@@ -690,6 +690,17 @@ else:
     _mmcv_utils.digit_version = digit_version
 
 
+# mmdet 3.x removed the legacy test seed helper.
+try:
+    import mmdet.apis as _mmdet_apis
+    from mmengine.runner import set_random_seed as _set_random_seed
+except Exception:
+    pass
+else:
+    if not hasattr(_mmdet_apis, 'set_random_seed'):
+        _mmdet_apis.set_random_seed = _set_random_seed
+
+
 # mmdet.models / mmdet3d.models old top-level registries ---------------------
 try:
     import mmdet.models as _mmdet_models

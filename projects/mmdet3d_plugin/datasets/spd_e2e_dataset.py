@@ -84,6 +84,8 @@ class SPD_E2E_Dataset(NuScenesDataset):
         self.file_client_args = file_client_args
         self.file_client = mmcv.FileClient(**file_client_args)
         self.load_interval = kwargs.pop('load_interval', 1)
+        self.eval_version = kwargs.pop('eval_version', 'detection_cvpr_2019')
+        self.eval_detection_configs = config_factory(self.eval_version)
 
         legacy_classes = kwargs.pop('classes', None)
         if legacy_classes is not None:

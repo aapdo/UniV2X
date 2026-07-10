@@ -216,8 +216,23 @@ else:
     try:
         import mmdet3d.datasets.transforms  # noqa: F401
         from mmdet3d.datasets.transforms import MultiScaleFlipAug3D
+
+        class LegacyMultiScaleFlipAug3D(MultiScaleFlipAug3D):
+            """Match the dict-of-augmentations output expected by UniMM."""
+
+            def transform(self, results):
+                augmented = super().transform(results)
+                if not augmented:
+                    return {}
+                return {
+                    key: [data[key] for data in augmented]
+                    for key in augmented[0]
+                }
+
         MMENGINE_TRANSFORMS.register_module(
-            name='MultiScaleFlipAug3D', module=MultiScaleFlipAug3D, force=True)
+            name='MultiScaleFlipAug3D',
+            module=LegacyMultiScaleFlipAug3D,
+            force=True)
     except Exception:
         pass
 

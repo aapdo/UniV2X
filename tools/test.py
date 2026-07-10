@@ -4,6 +4,7 @@ import argparse
 import h200_compat_smoke  # noqa: F401
 
 import cv2
+import numpy as np
 import torch
 import sklearn
 import mmcv
@@ -37,6 +38,7 @@ def parse_args():
     parser.add_argument('config', help='test config file path')
     parser.add_argument('checkpoint', help='checkpoint file')
     parser.add_argument('--out', default='output/results.pkl', help='output result file in pickle format')
+    parser.add_argument('--metrics-out', help='write evaluation metrics as JSON')
     parser.add_argument(
         '--fuse-conv-bn',
         action='store_true',
@@ -111,6 +113,21 @@ def parse_args():
         warnings.warn('--options is deprecated in favor of --eval-options')
         args.eval_options = args.options
     return args
+
+
+def make_json_serializable(value):
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu()
+        return value.item() if value.numel() == 1 else value.tolist()
+    if isinstance(value, np.ndarray):
+        return value.item() if value.size == 1 else value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: make_json_serializable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [make_json_serializable(item) for item in value]
+    return value
 
 
 def main():
@@ -287,7 +304,14 @@ def main():
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
 
-            print(dataset.evaluate(outputs, **eval_kwargs))
+            eval_results = dataset.evaluate(outputs, **eval_kwargs)
+            print(eval_results)
+            if args.metrics_out:
+                metrics_dir = osp.dirname(args.metrics_out)
+                if metrics_dir:
+                    mmcv.mkdir_or_exist(metrics_dir)
+                mmcv.dump(make_json_serializable(eval_results), args.metrics_out)
+                print(f'wrote evaluation metrics to {args.metrics_out}')
 
 
 if __name__ == '__main__':

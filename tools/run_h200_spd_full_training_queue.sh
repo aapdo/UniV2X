@@ -31,6 +31,9 @@ TUNE_COMBOS=${TUNE_COMBOS:-"8:1 6:1 4:1 2:2 1:4"}
 TUNE_MAX_ITERS=${TUNE_MAX_ITERS:-2}
 TUNE_WORKERS=${TUNE_WORKERS:-2}
 TRAIN_WORKERS=${TRAIN_WORKERS:-4}
+VALIDATION_ENABLED=${VALIDATION_ENABLED:-1}
+VALIDATION_WORKERS=${VALIDATION_WORKERS:-0}
+VALIDATION_MIN_SAMPLES=${VALIDATION_MIN_SAMPLES:-600}
 MASTER_PORT_BASE=${MASTER_PORT_BASE:-29620}
 GPU_FREE_MAX_MEM_MB=${GPU_FREE_MAX_MEM_MB:-500}
 GPU_FREE_MAX_UTIL=${GPU_FREE_MAX_UTIL:-5}
@@ -184,6 +187,59 @@ tune_stage() {
     exit 1
 }
 
+validate_stage() {
+    local name=$1
+    local cfg=$2
+    local checkpoint=$3
+    if [ "${VALIDATION_ENABLED}" != "1" ]; then
+        log "validation disabled for ${name}"
+        return 0
+    fi
+
+    local validation_dir="${LOGDIR}/validation_${name}"
+    local results="${validation_dir}/results.pkl"
+    local metrics="${validation_dir}/metrics.json"
+    local report="${validation_dir}/gate_report.json"
+    local validation_log="${validation_dir}/eval.log"
+    mkdir -p "${validation_dir}/tmp"
+
+    log "validating ${name}: checkpoint=${checkpoint}"
+    set +e
+    MASTER_PORT=$((MASTER_PORT_BASE + 3)) \
+        bash tools/unimmv2x_dist_eval.sh "${cfg}" "${checkpoint}" "${GPUS}" \
+            --out "${results}" \
+            --metrics-out "${metrics}" \
+            --tmpdir "${validation_dir}/tmp" \
+            --cfg-options data.workers_per_gpu="${VALIDATION_WORKERS}" \
+            > "${validation_log}" 2>&1
+    local eval_rc=$?
+
+    "${PYTHON}" tools/h200_stage_gate.py \
+        --stage "${name}" \
+        --checkpoint "${checkpoint}" \
+        --results "${results}" \
+        --metrics "${metrics}" \
+        --expected-epoch "$("${PYTHON}" - "${cfg}" <<'PY'
+import sys
+from mmengine.config import Config
+
+cfg = Config.fromfile(sys.argv[1])
+print(int(cfg.runner.max_epochs if "runner" in cfg else cfg.total_epochs))
+PY
+)" \
+        --min-samples "${VALIDATION_MIN_SAMPLES}" \
+        --report "${report}" \
+        >> "${validation_log}" 2>&1
+    local gate_rc=$?
+    set -e
+
+    if [ "${eval_rc}" -ne 0 ] || [ "${gate_rc}" -ne 0 ]; then
+        log "validation failed for ${name}: eval_rc=${eval_rc}, gate_rc=${gate_rc}; see ${validation_log}"
+        exit 1
+    fi
+    log "validation passed for ${name}: report=${report}"
+}
+
 run_stage() {
     local name=$1
     local cfg=$2
@@ -204,11 +260,13 @@ run_stage() {
         --workers-per-gpu "${TRAIN_WORKERS}" \
         2>&1 | tee "${train_log}"
 
+    if [ ! -s "${work_dir}/latest.pth" ]; then
+        log "missing latest checkpoint after ${name}: ${work_dir}/latest.pth"
+        exit 1
+    fi
+    validate_stage "${name}" "${cfg}" "${work_dir}/latest.pth"
+
     if [ -n "${next_ckpt}" ]; then
-        if [ ! -s "${work_dir}/latest.pth" ]; then
-            log "missing latest checkpoint after ${name}: ${work_dir}/latest.pth"
-            exit 1
-        fi
         mkdir -p "$(dirname "${next_ckpt}")"
         ln -sfn "$(realpath "${work_dir}/latest.pth")" "${next_ckpt}"
         log "linked ${next_ckpt} -> ${work_dir}/latest.pth"

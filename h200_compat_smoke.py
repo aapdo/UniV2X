@@ -70,6 +70,7 @@ try:
     import mmcv
     import mmengine
     from mmengine.config import Config, DictAction
+    from mmengine.utils import ProgressBar
     from mmengine.model import BaseModule
     from mmengine.dist import get_dist_info, init_dist
     from mmengine.runner.checkpoint import load_checkpoint
@@ -88,6 +89,8 @@ else:
         mmcv.Config = Config
     if not hasattr(mmcv, 'DictAction'):
         mmcv.DictAction = DictAction
+    if not hasattr(mmcv, 'ProgressBar'):
+        mmcv.ProgressBar = ProgressBar
 
     def _identity_fp_decorator(*dargs, **dkwargs):
         if dargs and callable(dargs[0]) and len(dargs) == 1 and not dkwargs:

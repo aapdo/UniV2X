@@ -1,4 +1,8 @@
 import argparse
+
+# Register legacy OpenMMLab shims before importing the original test stack.
+import h200_compat_smoke  # noqa: F401
+
 import cv2
 import torch
 import sklearn

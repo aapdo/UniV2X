@@ -38,6 +38,20 @@ class SPD_E2E_Dataset(NuScenesDataset):
     This dataset only add camera intrinsics and extrinsics to the results.
     """
 
+    # OpenMMLab 2.x removed this legacy nuScenes export mapping.
+    DefaultAttribute = {
+        'car': 'vehicle.parked',
+        'pedestrian': 'pedestrian.moving',
+        'trailer': 'vehicle.parked',
+        'truck': 'vehicle.parked',
+        'bus': 'vehicle.moving',
+        'motorcycle': 'cycle.without_rider',
+        'construction_vehicle': 'vehicle.parked',
+        'bicycle': 'cycle.without_rider',
+        'barrier': '',
+        'traffic_cone': '',
+    }
+
     def __init__(self,
                 queue_length=4,
                 bev_size=(200, 200),
@@ -1080,14 +1094,14 @@ class SPD_E2E_Dataset(NuScenesDataset):
                     elif name in ['bicycle', 'motorcycle']:
                         attr = 'cycle.with_rider'
                     else:
-                        attr = NuScenesDataset.DefaultAttribute[name]
+                        attr = self.DefaultAttribute[name]
                 else:
                     if name in ['pedestrian']:
                         attr = 'pedestrian.standing'
                     elif name in ['bus']:
                         attr = 'vehicle.stopped'
                     else:
-                        attr = NuScenesDataset.DefaultAttribute[name]
+                        attr = self.DefaultAttribute[name]
 
                 # center_ = box.center.tolist()
                 # change from ground height to center height
@@ -1211,14 +1225,14 @@ class SPD_E2E_Dataset(NuScenesDataset):
                     elif name in ['bicycle', 'motorcycle']:
                         attr = 'cycle.with_rider'
                     else:
-                        attr = NuScenesDataset.DefaultAttribute[name]
+                        attr = self.DefaultAttribute[name]
                 else:
                     if name in ['pedestrian']:
                         attr = 'pedestrian.standing'
                     elif name in ['bus']:
                         attr = 'vehicle.stopped'
                     else:
-                        attr = NuScenesDataset.DefaultAttribute[name]
+                        attr = self.DefaultAttribute[name]
 
                 nusc_anno = dict(
                     sample_token=sample_token,

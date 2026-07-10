@@ -51,6 +51,13 @@ class SPD_E2E_Dataset(NuScenesDataset):
         'barrier': '',
         'traffic_cone': '',
     }
+    ErrNameMapping = {
+        'trans_err': 'mATE',
+        'scale_err': 'mASE',
+        'orient_err': 'mAOE',
+        'vel_err': 'mAVE',
+        'attr_err': 'mAAE',
+    }
 
     def __init__(self,
                 queue_length=4,

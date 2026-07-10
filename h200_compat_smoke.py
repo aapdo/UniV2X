@@ -69,6 +69,7 @@ except Exception:
 try:
     import mmcv
     import mmengine
+    from mmengine.config import Config, DictAction
     from mmengine.model import BaseModule
     from mmengine.dist import get_dist_info, init_dist
     from mmengine.runner.checkpoint import load_checkpoint
@@ -83,6 +84,10 @@ else:
         mmcv.load = mmengine.load
     if not hasattr(mmcv, 'mkdir_or_exist'):
         mmcv.mkdir_or_exist = mmengine.mkdir_or_exist
+    if not hasattr(mmcv, 'Config'):
+        mmcv.Config = Config
+    if not hasattr(mmcv, 'DictAction'):
+        mmcv.DictAction = DictAction
 
     def _identity_fp_decorator(*dargs, **dkwargs):
         if dargs and callable(dargs[0]) and len(dargs) == 1 and not dkwargs:
